@@ -1,0 +1,25 @@
+name: ema_baseline
+
+dataset:
+  type: gcp_full
+  source_regions:
+    - us-east1
+    - europe-west1
+    - asia-northeast1
+    - asia-south1
+    - us-west1
+  lambda_rate: 5.0
+  mu_val: -2.0
+  sigma_val: 2.0
+
+simulation:
+  n_builders: 5
+  n_slots: 5000
+  delta: 4.0
+  seed: 42
+
+policy:
+  type: EMA
+  eta: 0.05
+  beta_reg: 1.5
+  cost_c: 0.0
