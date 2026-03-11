@@ -72,7 +72,7 @@ def compute_optimal_welfare_greedy(
     for _ in range(config.n_builders):
         best_w, best_r = -np.inf, 0
         for r in range(config.n_regions):
-            candidate = profile + [r] + [0] * (config.n_builders - len(profile) - 1)
+            candidate = profile + [r]
             w = _compute_welfare_analytical(candidate, sources, prop_model, config.delta, n_time_steps)
             if w > best_w:
                 best_w, best_r = w, r
