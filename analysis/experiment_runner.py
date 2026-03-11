@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import numpy as np
 from typing import List
 
 from sim.config import ExperimentConfig, create_scenario_from_config
@@ -99,6 +100,11 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True,
         print(f"\nLatency mean matrix:")
         print(latency_mean, "\n")
 
+    initial_belief = sum(
+        s.lambda_rate * config.delta * np.exp(s.mu_val + s.sigma_val ** 2 / 2)
+        for s in sources
+    )
+
     builders = []
     for i in range(config.n_builders):
         if config.policy_type == "EMA":
@@ -107,9 +113,10 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True,
                 eta=config.eta,
                 beta=config.beta_reg,
                 cost=config.cost_c,
+                initial_belief=initial_belief,
             )
         elif config.policy_type == "UCB":
-            policy = UCBPolicy(config.n_regions, alpha=config.alpha)
+            policy = UCBPolicy(config.n_regions, alpha=config.alpha, initial_belief=initial_belief)
         else:
             raise ValueError(f"Unknown policy: {config.policy_type}")
 

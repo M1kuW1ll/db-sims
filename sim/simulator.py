@@ -44,8 +44,8 @@ class LearningPolicy(ABC):
     """Abstract base class for learning policies."""
     beliefs: np.ndarray  # Policy's internal beliefs about region values
 
-    def __init__(self, n_regions: int):
-        self.beliefs = np.ones(n_regions) * 70
+    def __init__(self, n_regions: int, initial_belief: float = 0.0):
+        self.beliefs = np.ones(n_regions) * initial_belief
 
     @abstractmethod
     def choose(self, current_region: int) -> int:
@@ -71,14 +71,15 @@ class EMASoftmaxPolicy(LearningPolicy):
 
     def __init__(self, n_regions: int, eta: float = 0.1,
                  beta: float = 2.0,
-                 cost: float = 0.0):
+                 cost: float = 0.0,
+                 initial_belief: float = 0.0):
         """
         Args:
             eta: EMA learning rate
             beta: Temperature for region selection
             cost: Migration cost (subtracted from region score)
         """
-        super().__init__(n_regions)
+        super().__init__(n_regions, initial_belief)
         self.eta = eta
         self.beta = beta
         self.cost = cost
@@ -117,13 +118,14 @@ class UCBPolicy(LearningPolicy):
     Arms are regions.
     """
 
-    def __init__(self, n_regions: int, alpha: float = 1.0, cost: float = 0.0):
+    def __init__(self, n_regions: int, alpha: float = 1.0, cost: float = 0.0,
+                 initial_belief: float = 0.0):
         """
         Args:
             alpha: Exploration parameter
             cost: Migration cost
         """
-        super().__init__(n_regions)
+        super().__init__(n_regions, initial_belief)
         self.alpha = alpha
         self.cost = cost
 
