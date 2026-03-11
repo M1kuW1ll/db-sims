@@ -2,8 +2,7 @@ import numpy as np
 from scipy.special import log_ndtr
 from itertools import combinations_with_replacement
 
-from sim.simulator import (Builder, LatencyPropagationModel, FixedPolicy, 
-    LocationGamesSimulator, StochasticTransactionGenerator, EqualSplitSharingRule)
+from sim.simulator import LatencyPropagationModel
 from sim.config import ExperimentConfig, create_scenario_from_config
 from analysis.result import ExperimentResult
 
@@ -60,45 +59,26 @@ def compute_optimal_welfare_brute_force(
     return best_welfare, best_profile
 
 
-def _estimate_welfare_mc(
-    profile: list,
+def compute_optimal_welfare_greedy(
     config: ExperimentConfig,
-    n_rounds: int = 500,
-) -> float:
-    """Estimate E[W(s)] by running the simulator with builders frozen at profile."""
-    regions, sources, latency_mean, latency_std = create_scenario_from_config(config)
-    builders = [Builder(i, FixedPolicy(config.n_regions)) for i in range(config.n_builders)]
-    sim = LocationGamesSimulator(
-        regions=regions, sources=sources, builders=builders,
-        tx_generator=StochasticTransactionGenerator(),
-        propagation_model=LatencyPropagationModel(latency_mean, latency_std),
-        sharing_rule=EqualSplitSharingRule(),
-        delta=config.delta, seed=config.seed,
-    )
-    for i, builder in enumerate(sim.builders):
-        builder.set_region(profile[i])
-    sim.run(n_rounds)
-    return sim.get_statistics()['mean_welfare']
-
-
-def compute_optimal_welfare_greedy_mc(
-    config: ExperimentConfig,
-    n_rounds_per_eval: int = 500,
+    n_time_steps: int = 200,
 ) -> tuple:
-    """(1-1/e)-approximate optimal welfare via greedy + Monte Carlo welfare estimates.
-    Runs K*R welfare evaluations and each costs n_rounds_per_eval simulation rounds."""
+    """(1-1/e)-approximate optimal welfare via greedy + analytical welfare.
+    Runs K*R evaluations."""
+    _, sources, latency_mean, latency_std = create_scenario_from_config(config)
+    prop_model = LatencyPropagationModel(latency_mean, latency_std)
+
     profile = []
     for _ in range(config.n_builders):
         best_w, best_r = -np.inf, 0
         for r in range(config.n_regions):
-            # Fill unassigned builders with region 0 (consistent across candidates so argmax unaffected)
             candidate = profile + [r] + [0] * (config.n_builders - len(profile) - 1)
-            w = _estimate_welfare_mc(candidate, config, n_rounds_per_eval)
+            w = _compute_welfare_analytical(candidate, sources, prop_model, config.delta, n_time_steps)
             if w > best_w:
                 best_w, best_r = w, r
         profile.append(best_r)
 
-    final_welfare = _estimate_welfare_mc(profile, config, n_rounds_per_eval * 5)
+    final_welfare = _compute_welfare_analytical(profile, sources, prop_model, config.delta, n_time_steps)
     return final_welfare, profile
 
 
@@ -106,14 +86,12 @@ def compute_poa_stats(
     result: ExperimentResult,
     method: str = 'brute_force',
     n_time_steps: int = 200,
-    n_rounds_per_eval: int = 500,
 ) -> dict:
     """Compute PoA statistics for a completed experiment result.
 
     Args:
-        method: 'brute_force' (exact, analytical) or 'greedy_mc' (approximate, simulation-based)
-        n_time_steps: time discretisation for brute_force integral (higher = more accurate)
-        n_rounds_per_eval: MC rounds per profile evaluation for greedy_mc
+        method: 'brute_force' (exact, analytical) or 'greedy'
+        n_time_steps: time discretisation for the analytical integral
     """
     _, sources, _, _ = create_scenario_from_config(result.config)
     w_upper = sum(
@@ -124,10 +102,10 @@ def compute_poa_stats(
 
     if method == 'brute_force':
         w_star, opt_profile = compute_optimal_welfare_brute_force(result.config, n_time_steps)
-    elif method == 'greedy_mc':
-        w_star, opt_profile = compute_optimal_welfare_greedy_mc(result.config, n_rounds_per_eval)
+    elif method == 'greedy':
+        w_star, opt_profile = compute_optimal_welfare_greedy(result.config, n_time_steps)
     else:
-        raise ValueError(f"Unknown PoA method: {method!r}. Use 'brute_force' or 'greedy_mc'.")
+        raise ValueError(f"Unknown PoA method: {method!r}. Use 'brute_force' or 'greedy'.")
 
     return {
         'w_star': w_star,

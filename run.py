@@ -6,7 +6,7 @@ Usage:
     python run.py configs/  # run all YAML files in a directory
     python run.py configs/ema_baseline.yaml  # run a single config file
     python run.py configs/ema_baseline.yaml --poa  # also compute PoA (default: brute-force method)
-    python run.py configs/ema_baseline.yaml --poa --poa-method greedy_mc  # use greedy MC method for PoA
+    python run.py configs/ema_baseline.yaml --poa --poa-method greedy  # use greedy method for PoA
 """
 
 import argparse
@@ -20,11 +20,11 @@ from analysis.plotting import compare_experiments, print_comparison_table, plot_
 def main():
     parser = argparse.ArgumentParser(
         description="Run db-sims experiments",
-        usage="python run.py <config.yaml> [config2.yaml ...] | <configs_dir/> [--poa] [--poa-method {brute_force,greedy_mc}]",
+        usage="python run.py <config.yaml> [config2.yaml ...] | <configs_dir/> [--poa] [--poa-method {brute_force,greedy}]",
     )
     parser.add_argument("configs", nargs="+", help="Config YAML files or directories")
     parser.add_argument("--poa", action="store_true", help="Compute Price of Anarchy stats (expensive)")
-    parser.add_argument("--poa-method", choices=["brute_force", "greedy_mc"], default="brute_force",
+    parser.add_argument("--poa-method", choices=["brute_force", "greedy"], default="brute_force",
                         help="PoA computation method (default: brute_force)")
     args = parser.parse_args()
 
