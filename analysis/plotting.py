@@ -374,8 +374,19 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
     policy_info = result.config.policy_type
     if result.config.policy_type == "EMA":
         policy_info += f" (η={result.config.eta}, β_reg={result.config.beta_reg}, c={result.config.cost_c})"
-    else:
+    elif result.config.policy_type == "UCB":
         policy_info += f" (α={result.config.alpha})"
+    elif result.config.policy_type == "ABR":
+        policy_info += (
+            f" (threshold={100 * result.config.improvement_threshold_pct:.3f}%, "
+            f"grid={result.config.utility_eval_time_steps})"
+        )
+    elif result.config.policy_type == "MWU":
+        norm = result.config.payoff_normalization
+        norm_str = f"{norm:.3f}" if norm is not None else "auto"
+        policy_info += f" (η={result.config.mwu_eta}, norm={norm_str})"
+    else:
+        policy_info += " (custom)"
 
     fig.suptitle(f'Experiment: {result.config.name} | {policy_info}',
                  fontsize=13, fontweight='bold')

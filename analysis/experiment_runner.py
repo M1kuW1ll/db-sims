@@ -7,7 +7,7 @@ from analysis.result import ExperimentResult
 from analysis.poa import compute_poa_stats
 from sim.simulator import (
     Region, Source, Builder, LocationGamesSimulator,
-    EMASoftmaxPolicy, UCBPolicy, StochasticTransactionGenerator,
+    EMASoftmaxPolicy, FixedPolicy, UCBPolicy, StochasticTransactionGenerator,
     LatencyPropagationModel, EqualSplitSharingRule,
 )
 
@@ -72,6 +72,35 @@ def get_preset_config(preset_name: str) -> ExperimentConfig:
             cost_c=0.0,
             n_builders=8,
             n_slots=10000
+        ),
+
+        "abr_exact": ExperimentConfig(
+            name="abr_exact",
+            n_regions=5,
+            sources_config=[
+                ("Source1", 0, 6.0, 1.0, 0.5),
+                ("Source2", 2, 4.0, 1.2, 0.5),
+                ("Source3", 4, 3.0, 1.5, 0.5),
+            ],
+            policy_type="ABR",
+            improvement_threshold_pct=0.001,
+            utility_eval_time_steps=200,
+            n_builders=8,
+            n_slots=5000,
+        ),
+
+        "mwu_baseline": ExperimentConfig(
+            name="mwu_baseline",
+            n_regions=5,
+            sources_config=[
+                ("Source1", 0, 6.0, 1.0, 0.5),
+                ("Source2", 2, 4.0, 1.2, 0.5),
+                ("Source3", 4, 3.0, 1.5, 0.5),
+            ],
+            policy_type="MWU",
+            mwu_eta=0.1,
+            n_builders=8,
+            n_slots=5000,
         )
     }
 
@@ -97,6 +126,8 @@ def _run_single(config: ExperimentConfig, seed: int,
             )
         elif config.policy_type == "UCB":
             policy = UCBPolicy(config.n_regions, alpha=config.alpha, initial_belief=initial_belief)
+        elif config.policy_type in {"ABR", "MWU"}:
+            policy = FixedPolicy(config.n_regions, initial_belief=initial_belief)
         else:
             raise ValueError(f"Unknown policy: {config.policy_type}")
         builders.append(Builder(i, policy))
@@ -111,7 +142,23 @@ def _run_single(config: ExperimentConfig, seed: int,
         delta=config.delta,
         seed=seed,
     )
-    sim.run(config.n_slots)
+    if config.policy_type in {"EMA", "UCB"}:
+        sim.run(config.n_slots)
+    elif config.policy_type == "ABR":
+        sim.run_async_better_response(
+            config.n_slots,
+            improvement_threshold_pct=config.improvement_threshold_pct,
+            n_time_steps=config.utility_eval_time_steps,
+        )
+    elif config.policy_type == "MWU":
+        sim.run_mwu(
+            config.n_slots,
+            eta=config.mwu_eta,
+            payoff_normalization=config.payoff_normalization,
+        )
+    else:
+        raise ValueError(f"Unknown policy: {config.policy_type}")
+
     result = ExperimentResult(config, sim)
     result.seed = seed
     return result

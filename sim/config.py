@@ -32,8 +32,8 @@ class ExperimentConfig:
     latency_mean: Optional[np.ndarray] = None
     latency_std: Optional[np.ndarray] = None
 
-    # Policy configuration
-    policy_type: str = "EMA"  # "EMA" or "UCB"
+    # Policy / dynamic configuration
+    policy_type: str = "EMA"  # "EMA", "UCB", "ABR", or "MWU"
 
     # EMA policy parameters
     eta: float = 0.12
@@ -42,6 +42,14 @@ class ExperimentConfig:
 
     # UCB policy parameters
     alpha: float = 2.0
+
+    # Asynchronous better-response parameters
+    improvement_threshold_pct: float = 0.001
+    utility_eval_time_steps: int = 200
+
+    # MWU parameters
+    mwu_eta: float = 0.1
+    payoff_normalization: Optional[float] = None
 
     # Simulation parameters
     n_builders: int = 8
@@ -122,6 +130,10 @@ def load_config(path) -> ExperimentConfig:
         beta_reg=pol.get("beta_reg", 1.5),
         cost_c=pol.get("cost_c", 0.0),
         alpha=pol.get("alpha", 2.0),
+        improvement_threshold_pct=pol.get("improvement_threshold_pct", 0.001),
+        utility_eval_time_steps=pol.get("utility_eval_time_steps", 200),
+        mwu_eta=pol.get("mwu_eta", pol.get("eta", 0.1)),
+        payoff_normalization=pol.get("payoff_normalization"),
     )
 
 

@@ -1,0 +1,30 @@
+name: abr_heterogeneous_sources
+
+dataset:
+  type: gcp_full
+  source_regions:
+    - region: us-east1
+      lambda_rate: 10.0
+      mu_val: -3.0
+      sigma_val: 1.0
+    - region: europe-west1
+      lambda_rate: 1.0
+      mu_val: 0.0
+      sigma_val: 2.5
+    - asia-northeast1
+    - asia-south1
+    - us-west1
+  lambda_rate: 5.0
+  mu_val: -2.0
+  sigma_val: 2.0
+
+simulation:
+  n_builders: 5
+  n_slots: 10000
+  delta: 4.0
+  n_runs: 1
+
+policy:
+  type: ABR
+  improvement_threshold_pct: 0.0001
+  utility_eval_time_steps: 400

@@ -2,13 +2,15 @@
 
 Simulator for studying geographic location choice incentives in decentralized block building.
 
-Agents (builders) learn to pick regions via reinforcement learning (EMA-Softmax or UCB). Rewards are shared among builders who cover a source using a configurable sharing rule (e.g., `equal_split`). The simulator tracks how the population distributes across regions over time and how efficiently sources are covered.
+Agents (builders) can adapt their locations using `EMA`-Softmax, `UCB`, asynchronous strict better response (`ABR`), or multiplicative weights update (`MWU`). Rewards are shared among builders who cover a source using a configurable sharing rule (e.g., `equal_split`). The simulator tracks how the population distributes across regions over time and how efficiently sources are covered.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
 python run.py configs/ema_baseline.yaml
+python run.py configs/abr_baseline.yaml
+python run.py configs/mwu_baseline.yaml
 ```
 
 To run all configs in a directory:
@@ -39,12 +41,21 @@ Results and plots are saved to `results/`.
 
 | Parameter | Description |
 |---|---|
-| `policy_type` | `"EMA"` or `"UCB"` |
+| `policy_type` | `"EMA"`, `"UCB"`, `"ABR"`, or `"MWU"` |
 | `eta`, `beta_reg` | EMA learning rate and softmax temperature |
 | `alpha` | UCB exploration bonus |
+| `improvement_threshold_pct` | Relative improvement threshold for strict better response |
+| `utility_eval_time_steps` | Deterministic integration grid size for exact ABR utility evaluation |
+| `mwu_eta` | MWU learning rate |
+| `payoff_normalization` | Optional MWU payoff scale before clipping to `[0, 1]` |
 | `cost_c` | Migration cost |
 | `n_builders` | Number of concurrent builders per slot |
 | `n_slots` | Number of simulation slots |
+
+## Dynamics
+
+- `ABR`: each iteration picks one builder uniformly at random and computes exact expected payoffs for all regions under the current pure profile. The builder moves only if the best region improves utility by more than `improvement_threshold_pct` times its current utility. Ties stay put.
+- `MWU`: each builder maintains a mixed strategy over regions, samples an action every round, then updates all region weights using full-information counterfactual realized payoffs from that same stochastic round.
 
 ## Metrics
 
