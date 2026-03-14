@@ -5,8 +5,9 @@ Decentralized Building Simulator (db-sims) - Core simulation engine.
 Supported dynamics:
   (A) EMA + softmax
   (B) Individual UCB bandit
-  (C) Asynchronous strict better response with exact utility evaluation
-  (D) Full-information multiplicative weights update (MWU)
+  (C) Individual EXP3 bandit
+  (D) Asynchronous strict better response with exact utility evaluation
+  (E) Full-information multiplicative weights update (MWU)
 """
 from collections import defaultdict
 
@@ -129,6 +130,55 @@ class UCBPolicy(LearningPolicy):
 
     def get_name(self) -> str:
         return "UCB"
+
+
+class EXP3Policy(LearningPolicy):
+    """Policy C: individual EXP3 bandit with clipped rewards."""
+
+    def __init__(
+        self,
+        n_regions: int,
+        gamma: float = 0.07,
+        payoff_normalization: float = 1.0,
+        initial_belief: float = 0.0,
+    ):
+        super().__init__(n_regions, initial_belief)
+        self.gamma = float(np.clip(gamma, 1e-9, 1.0))
+        self.payoff_normalization = max(float(payoff_normalization), 1.0)
+        self.weights = np.ones(len(self.beliefs), dtype=float)
+        self.last_probabilities = np.ones(len(self.beliefs), dtype=float) / len(self.beliefs)
+        self.last_action: Optional[int] = None
+
+    def choose(self, current_region: int) -> int:
+        del current_region  # EXP3 samples directly from its mixed strategy.
+
+        weight_sum = np.sum(self.weights)
+        if weight_sum <= 0:
+            base_probs = np.ones(len(self.weights), dtype=float) / len(self.weights)
+        else:
+            base_probs = self.weights / weight_sum
+
+        n_regions = len(self.weights)
+        self.last_probabilities = (1.0 - self.gamma) * base_probs + self.gamma / n_regions
+        region_id = int(np.random.choice(n_regions, p=self.last_probabilities))
+        self.last_action = region_id
+        return region_id
+
+    def update(self, region_id: int, reward: float):
+        if self.last_action is None:
+            return
+
+        del region_id
+        action = self.last_action
+        normalized_reward = float(np.clip(reward / self.payoff_normalization, 0.0, 1.0))
+        probability = max(float(self.last_probabilities[action]), 1e-12)
+        estimated_reward = normalized_reward / probability
+        self.weights[action] *= np.exp(self.gamma * estimated_reward / len(self.weights))
+        self.beliefs[action] = estimated_reward
+        self.last_action = None
+
+    def get_name(self) -> str:
+        return "EXP3"
 
 
 class FixedPolicy(LearningPolicy):
@@ -277,6 +327,10 @@ class LocationGamesSimulator:
         self.region_reward_pairs_history: List[List[tuple]] = []
         self.tx_emitted_history: List[float] = []
         self.tx_received_history: List[float] = []
+        self.abr_adaptation_steps: int = 0
+        self.abr_converged: bool = False
+        self.abr_final_profile: Optional[List[int]] = None
+        self.abr_max_profitable_deviation: float = 0.0
 
     def _initialize_builder_distribution(self):
         for i, builder in enumerate(self.builders):
@@ -308,6 +362,19 @@ class LocationGamesSimulator:
         )
         self.tx_emitted_history.append(float(tx_emitted))
         self.tx_received_history.append(float(tx_received))
+
+    def _clear_history(self):
+        self.region_counts_history.clear()
+        self.reward_history.clear()
+        self.welfare_history.clear()
+        self.builder_distribution_history.clear()
+        self.region_reward_pairs_history.clear()
+        self.tx_emitted_history.clear()
+        self.tx_received_history.clear()
+
+    def _set_profile(self, profile: List[int]):
+        for builder, region_id in zip(self.builders, profile):
+            builder.set_region(region_id)
 
     def _simulate_round_for_profile(
         self,
@@ -455,6 +522,36 @@ class LocationGamesSimulator:
 
         return float(total_utility)
 
+    def compute_candidate_utilities_for_builder(
+        self,
+        builder_id: int,
+        profile: Optional[List[int]] = None,
+        n_time_steps: int = 200,
+    ) -> np.ndarray:
+        if profile is None:
+            profile = self._current_profile()
+
+        counts = np.bincount(profile, minlength=self.n_regions).astype(int)
+        current_region = profile[builder_id]
+        counts_other = counts.copy()
+        counts_other[current_region] -= 1
+
+        env = self._get_expected_environment(n_time_steps)
+        q_by_source = env["q_by_source"]
+        source_value_weights = env["source_value_weights"]
+
+        return np.array(
+            [
+                self._expected_utility_from_candidate_region(
+                    candidate_region=region_id,
+                    counts_other=counts_other,
+                    q_by_source=q_by_source,
+                    source_value_weights=source_value_weights,
+                )
+                for region_id in range(self.n_regions)
+            ]
+        )
+
     def compute_expected_builder_utilities(
         self,
         profile: Optional[List[int]] = None,
@@ -519,52 +616,20 @@ class LocationGamesSimulator:
 
         return float(expected_captured)
 
-    def run_async_better_response(
-        self,
-        n_slots: int,
-        improvement_threshold_pct: float = 0.001,
-        n_time_steps: int = 200,
-    ):
-        env = self._get_expected_environment(n_time_steps)
-        q_by_source = env["q_by_source"]
-        source_value_weights = env["source_value_weights"]
+    def evaluate_fixed_profile(self, n_slots: int, profile: Optional[List[int]] = None):
+        if profile is None:
+            profile = self._current_profile()
+        else:
+            self._set_profile(profile)
 
+        builder_selected_regions = {builder.id: builder.current_region for builder in self.builders}
         for _ in range(n_slots):
-            builder_id = int(np.random.randint(self.n_builders))
-            builder = self.builders[builder_id]
-
-            counts = self._get_builder_distribution().astype(int)
-            current_region = builder.current_region
-            counts_other = counts.copy()
-            counts_other[current_region] -= 1
-
-            candidate_utilities = np.array(
-                [
-                    self._expected_utility_from_candidate_region(
-                        candidate_region=region_id,
-                        counts_other=counts_other,
-                        q_by_source=q_by_source,
-                        source_value_weights=source_value_weights,
-                    )
-                    for region_id in range(self.n_regions)
-                ]
-            )
-
-            current_utility = candidate_utilities[current_region]
-            improvement_threshold = improvement_threshold_pct * current_utility
-            best_region = int(np.argmax(candidate_utilities))
-            best_utility = candidate_utilities[best_region]
-
-            if best_region != current_region and best_utility > current_utility + improvement_threshold:
-                builder.set_region(best_region)
-
-            builder_selected_regions = {b.id: b.current_region for b in self.builders}
             outcome = self._simulate_round_for_profile(
                 builder_selected_regions=builder_selected_regions,
                 evaluate_all_regions=False,
             )
             region_counts = self._get_builder_distribution()
-            slot_rewards = [outcome.rewards.get(b.id, 0.0) for b in self.builders]
+            slot_rewards = [outcome.rewards.get(builder.id, 0.0) for builder in self.builders]
             self._record_state(
                 region_counts=region_counts,
                 slot_rewards=slot_rewards,
@@ -572,6 +637,109 @@ class LocationGamesSimulator:
                 tx_emitted=outcome.tx_emitted_count,
                 tx_received=outcome.tx_received_count,
             )
+
+    def verify_pure_nash_equilibrium(
+        self,
+        profile: Optional[List[int]] = None,
+        n_time_steps: int = 200,
+        tolerance: float = 1e-12,
+    ) -> Dict[str, object]:
+        if profile is None:
+            profile = self._current_profile()
+
+        profile = list(profile)
+        gains = np.zeros((self.n_builders, self.n_regions))
+        profitable_deviations = []
+        max_gain = -np.inf
+
+        for builder_id in range(self.n_builders):
+            candidate_utilities = self.compute_candidate_utilities_for_builder(
+                builder_id=builder_id,
+                profile=profile,
+                n_time_steps=n_time_steps,
+            )
+            current_region = profile[builder_id]
+            current_utility = candidate_utilities[current_region]
+            builder_gains = candidate_utilities - current_utility
+            gains[builder_id] = builder_gains
+
+            best_region = int(np.argmax(candidate_utilities))
+            best_gain = float(builder_gains[best_region])
+            max_gain = max(max_gain, best_gain)
+            if best_gain > tolerance:
+                profitable_deviations.append(
+                    {
+                        "builder_id": builder_id,
+                        "current_region": current_region,
+                        "best_region": best_region,
+                        "gain": best_gain,
+                    }
+                )
+
+        if max_gain == -np.inf:
+            max_gain = 0.0
+
+        return {
+            "is_pure_ne": len(profitable_deviations) == 0,
+            "max_gain": float(max_gain),
+            "gains": gains,
+            "profitable_deviations": profitable_deviations,
+        }
+
+    def run_async_better_response(
+        self,
+        n_slots: int,
+        improvement_threshold_pct: float = 0.001,
+        n_time_steps: int = 200,
+        max_updates: Optional[int] = None,
+    ):
+        if max_updates is None:
+            max_updates = max(n_slots, self.n_builders)
+
+        updates = 0
+        converged = False
+
+        while updates < max_updates:
+            moved_in_pass = False
+            for builder_id in np.random.permutation(self.n_builders):
+                profile = self._current_profile()
+                candidate_utilities = self.compute_candidate_utilities_for_builder(
+                    builder_id=builder_id,
+                    profile=profile,
+                    n_time_steps=n_time_steps,
+                )
+
+                current_region = profile[builder_id]
+                current_utility = candidate_utilities[current_region]
+                improvement_threshold = improvement_threshold_pct * current_utility
+                best_region = int(np.argmax(candidate_utilities))
+                best_utility = candidate_utilities[best_region]
+
+                if best_region != current_region and best_utility > current_utility + improvement_threshold:
+                    self.builders[builder_id].set_region(best_region)
+                    updates += 1
+                    moved_in_pass = True
+                    if updates >= max_updates:
+                        break
+
+            if not moved_in_pass:
+                converged = True
+                break
+
+        final_profile = self._current_profile()
+        ne_check = self.verify_pure_nash_equilibrium(
+            profile=final_profile,
+            n_time_steps=n_time_steps,
+            tolerance=1e-12,
+        )
+
+        self.abr_adaptation_steps = updates
+        self.abr_converged = converged and bool(ne_check["is_pure_ne"])
+        self.abr_final_profile = list(final_profile)
+        self.abr_max_profitable_deviation = float(ne_check["max_gain"])
+
+        self._clear_history()
+        self.evaluate_fixed_profile(n_slots=n_slots, profile=final_profile)
 
     def _compute_mwu_counterfactual_payoffs(
         self,
@@ -702,4 +870,8 @@ class LocationGamesSimulator:
             "mean_coverage_ratio": mean_coverage_ratio,
             "mean_txs_received_per_builder": mean_txs_per_builder,
             "mean_value_per_builder": mean_value_per_builder,
+            "abr_adaptation_steps": self.abr_adaptation_steps,
+            "abr_converged": self.abr_converged,
+            "abr_final_profile": self.abr_final_profile,
+            "abr_max_profitable_deviation": self.abr_max_profitable_deviation,
         }

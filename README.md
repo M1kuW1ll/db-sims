@@ -2,13 +2,14 @@
 
 Simulator for studying geographic location choice incentives in decentralized block building.
 
-Agents (builders) can adapt their locations using `EMA`-Softmax, `UCB`, asynchronous strict better response (`ABR`), or multiplicative weights update (`MWU`). Rewards are shared among builders who cover a source using a configurable sharing rule (e.g., `equal_split`). The simulator tracks how the population distributes across regions over time and how efficiently sources are covered.
+Agents (builders) can adapt their locations using `EMA`-Softmax, `UCB`, `EXP3`, asynchronous strict better response (`ABR`), or multiplicative weights update (`MWU`). Rewards are shared among builders who cover a source using a configurable sharing rule (e.g., `equal_split`). The simulator tracks how the population distributes across regions over time and how efficiently sources are covered.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
 python run.py configs/ema_baseline.yaml
+python run.py configs/exp3_baseline.yaml
 python run.py configs/abr_baseline.yaml
 python run.py configs/mwu_baseline.yaml
 ```
@@ -41,20 +42,23 @@ Results and plots are saved to `results/`.
 
 | Parameter | Description |
 |---|---|
-| `policy_type` | `"EMA"`, `"UCB"`, `"ABR"`, or `"MWU"` |
+| `policy_type` | `"EMA"`, `"UCB"`, `"EXP3"`, `"ABR"`, or `"MWU"` |
 | `eta`, `beta_reg` | EMA learning rate and softmax temperature |
 | `alpha` | UCB exploration bonus |
-| `improvement_threshold_pct` | Relative improvement threshold for strict better response |
+| `exp3_gamma` | EXP3 exploration / update parameter |
+| `improvement_threshold_pct` | Relative improvement threshold for strict better response (use `0.0` for exact pure-NE search) |
 | `utility_eval_time_steps` | Deterministic integration grid size for exact ABR utility evaluation |
+| `abr_max_updates` | Maximum ABR unilateral moves during adaptation before frozen evaluation |
 | `mwu_eta` | MWU learning rate |
-| `payoff_normalization` | Optional MWU payoff scale before clipping to `[0, 1]` |
+| `payoff_normalization` | Optional EXP3/MWU payoff scale before clipping to `[0, 1]` |
 | `cost_c` | Migration cost |
 | `n_builders` | Number of concurrent builders per slot |
 | `n_slots` | Number of simulation slots |
 
 ## Dynamics
 
-- `ABR`: each iteration picks one builder uniformly at random and computes exact expected payoffs for all regions under the current pure profile. The builder moves only if the best region improves utility by more than `improvement_threshold_pct` times its current utility. Ties stay put.
+- `EXP3`: each builder maintains a mixed strategy over regions, samples one region per round, and applies an importance-weighted update using only the realized reward of the sampled region.
+- `ABR`: first runs a pure-profile adaptation phase with asynchronous better responses under exact expected builder utility until no improving move remains or `abr_max_updates` is reached, then freezes the resulting profile and evaluates it over stochastic rounds.
 - `MWU`: each builder maintains a mixed strategy over regions, samples an action every round, then updates all region weights using full-information counterfactual realized payoffs from that same stochastic round.
 
 ## Metrics

@@ -11,6 +11,7 @@ from sim.config import create_scenario_from_config
 from sim.simulator import (
     Builder,
     EMASoftmaxPolicy,
+    EXP3Policy,
     EqualSplitSharingRule,
     FixedPolicy,
     LatencyPropagationModel,
@@ -183,11 +184,21 @@ class TestAsynchronousBetterResponse(unittest.TestCase):
         for builder in sim.builders:
             builder.set_region(1)
 
-        sim.run_async_better_response(n_slots=1, improvement_threshold_pct=0.001, n_time_steps=50)
+        sim.run_async_better_response(
+            n_slots=3,
+            improvement_threshold_pct=0.001,
+            n_time_steps=50,
+            max_updates=10,
+        )
 
-        self.assertIn(0, [builder.current_region for builder in sim.builders])
-        self.assertEqual(len(sim.welfare_history), 1)
+        final_profile = [builder.current_region for builder in sim.builders]
+        self.assertIn(0, final_profile)
+        self.assertEqual(len(sim.welfare_history), 3)
         self.assertGreaterEqual(sim.tx_emitted_history[0], 0.0)
+        ne_check = sim.verify_pure_nash_equilibrium(n_time_steps=50)
+        self.assertTrue(ne_check["is_pure_ne"])
+        self.assertTrue(sim.abr_converged)
+        self.assertLessEqual(sim.abr_max_profitable_deviation, 0.001)
 
 
 class TestMWU(unittest.TestCase):
@@ -241,6 +252,46 @@ class TestMWU(unittest.TestCase):
         )
 
         sim.run_mwu(n_slots=5, eta=0.2, payoff_normalization=2.0)
+
+        self.assertEqual(len(sim.region_counts_history), 5)
+        self.assertEqual(len(sim.reward_history), 5)
+        self.assertEqual(len(sim.welfare_history), 5)
+
+
+class TestEXP3(unittest.TestCase):
+    def test_exp3_positive_reward_increases_selected_weight(self):
+        policy = EXP3Policy(n_regions=3, gamma=0.2, payoff_normalization=2.0)
+
+        np.random.seed(0)
+        chosen_region = policy.choose(current_region=0)
+        weights_before = policy.weights.copy()
+
+        policy.update(chosen_region, reward=2.0)
+
+        self.assertGreater(policy.weights[chosen_region], weights_before[chosen_region])
+        for region_id in range(3):
+            if region_id != chosen_region:
+                self.assertAlmostEqual(policy.weights[region_id], weights_before[region_id])
+
+    def test_exp3_runs_and_records_history(self):
+        regions = [Region(0, "Fast"), Region(1, "Slow")]
+        sources = [Source(0, "S0", 0, 2.0, 0.0, 0.01)]
+        latency_mean = np.array([[0.01], [100.0]])
+        latency_std = np.array([[0.001], [1.0]])
+        builders = [Builder(i, EXP3Policy(2, gamma=0.2, payoff_normalization=2.0)) for i in range(2)]
+
+        sim = LocationGamesSimulator(
+            regions=regions,
+            sources=sources,
+            builders=builders,
+            tx_generator=StochasticTransactionGenerator(),
+            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
+            sharing_rule=EqualSplitSharingRule(),
+            delta=1.0,
+            seed=0,
+        )
+
+        sim.run(n_slots=5)
 
         self.assertEqual(len(sim.region_counts_history), 5)
         self.assertEqual(len(sim.reward_history), 5)

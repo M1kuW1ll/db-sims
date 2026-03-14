@@ -20,5 +20,6 @@ simulation:
 
 policy:
   type: ABR
-  improvement_threshold_pct: 0.0001
+  improvement_threshold_pct: 0.0
   utility_eval_time_steps: 400
+  abr_max_updates: 10000

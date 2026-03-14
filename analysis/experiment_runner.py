@@ -7,7 +7,7 @@ from analysis.result import ExperimentResult
 from analysis.poa import compute_poa_stats
 from sim.simulator import (
     Region, Source, Builder, LocationGamesSimulator,
-    EMASoftmaxPolicy, FixedPolicy, UCBPolicy, StochasticTransactionGenerator,
+    EMASoftmaxPolicy, EXP3Policy, FixedPolicy, UCBPolicy, StochasticTransactionGenerator,
     LatencyPropagationModel, EqualSplitSharingRule,
 )
 
@@ -59,6 +59,20 @@ def get_preset_config(preset_name: str) -> ExperimentConfig:
             n_slots=10000
         ),
 
+        "exp3_exploration": ExperimentConfig(
+            name="exp3_exploration",
+            n_regions=5,
+            sources_config=[
+                ("Source1", 0, 6.0, 1.0, 0.5),
+                ("Source2", 2, 4.0, 1.2, 0.5),
+                ("Source3", 4, 3.0, 1.5, 0.5),
+            ],
+            policy_type="EXP3",
+            exp3_gamma=0.07,
+            n_builders=8,
+            n_slots=10000
+        ),
+
         "high_migration_cost": ExperimentConfig(
             name="high_migration_cost",
             n_regions=5,
@@ -83,8 +97,9 @@ def get_preset_config(preset_name: str) -> ExperimentConfig:
                 ("Source3", 4, 3.0, 1.5, 0.5),
             ],
             policy_type="ABR",
-            improvement_threshold_pct=0.001,
+            improvement_threshold_pct=0.0,
             utility_eval_time_steps=200,
+            abr_max_updates=5000,
             n_builders=8,
             n_slots=5000,
         ),
@@ -125,7 +140,24 @@ def _run_single(config: ExperimentConfig, seed: int,
                 initial_belief=initial_belief,
             )
         elif config.policy_type == "UCB":
-            policy = UCBPolicy(config.n_regions, alpha=config.alpha, initial_belief=initial_belief)
+            policy = UCBPolicy(
+                config.n_regions,
+                alpha=config.alpha,
+                cost=config.cost_c,
+                initial_belief=initial_belief,
+            )
+        elif config.policy_type == "EXP3":
+            payoff_normalization = (
+                config.payoff_normalization
+                if config.payoff_normalization is not None and config.payoff_normalization > 0
+                else initial_belief
+            )
+            policy = EXP3Policy(
+                config.n_regions,
+                gamma=config.exp3_gamma,
+                payoff_normalization=payoff_normalization,
+                initial_belief=initial_belief,
+            )
         elif config.policy_type in {"ABR", "MWU"}:
             policy = FixedPolicy(config.n_regions, initial_belief=initial_belief)
         else:
@@ -142,13 +174,14 @@ def _run_single(config: ExperimentConfig, seed: int,
         delta=config.delta,
         seed=seed,
     )
-    if config.policy_type in {"EMA", "UCB"}:
+    if config.policy_type in {"EMA", "UCB", "EXP3"}:
         sim.run(config.n_slots)
     elif config.policy_type == "ABR":
         sim.run_async_better_response(
             config.n_slots,
             improvement_threshold_pct=config.improvement_threshold_pct,
             n_time_steps=config.utility_eval_time_steps,
+            max_updates=config.abr_max_updates,
         )
     elif config.policy_type == "MWU":
         sim.run_mwu(
@@ -234,6 +267,10 @@ def print_results(result: ExperimentResult, regions: List[Region], sources: List
     print(f"Mean txs emitted per round: {stats['mean_txs_emitted_per_round']:.2f}")
     print(f"Mean txs received per round: {stats['mean_txs_received_per_round']:.2f}")
     print(f"Mean coverage ratio: {stats['mean_coverage_ratio']:.4f}")
+    if result.config.policy_type == "ABR":
+        print(f"ABR adaptation steps: {stats['abr_adaptation_steps']}")
+        print(f"ABR converged to pure NE: {stats['abr_converged']}")
+        print(f"ABR max profitable deviation: {stats['abr_max_profitable_deviation']:.6f}")
 
     print(f"\nBuilder distribution across regions (avg over time):")
     for i, count in enumerate(stats['avg_builder_distribution']):
