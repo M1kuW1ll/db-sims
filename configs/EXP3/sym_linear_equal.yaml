@@ -1,0 +1,31 @@
+name: exp3_sym_linear_equal
+
+# linear topology, 5 builders, 10 regions, 5 sources
+# Sources at even indices [0,2,4,6,8] — symmetric around centre.
+
+dataset:
+  type: synthetic
+  region_names: [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]
+  latency_topology: linear
+  latency_mean_base: 0.1
+  latency_mean_scale: 1.0
+  source_regions: [0, 2, 4, 6, 8]
+  lambda_rate: 4.28
+  mu_val: -11.29
+  sigma_val: 1.86
+
+simulation:
+  n_builders: 5
+  n_slots: 20000
+  delta: 4.0
+  n_runs: 1
+
+policy:
+  type: EXP3
+  eta: 0.05
+  gamma: 0.3
+  gamma_schedule: exponential
+  gamma_min: 0.01
+  gamma_decay: 0.0003
+  norm_alpha: 0.01
+  n_t: 100

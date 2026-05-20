@@ -33,6 +33,9 @@ class ExperimentConfig:
     latency_std: Optional[np.ndarray] = None
 
     # Policy / dynamic configuration
+    # Propagation model: "lognormal" for stochastic (GCP), "fixed" for deterministic (synthetic)
+    propagation_model_type: str = "lognormal"
+
     policy_type: str = "EMA"  # "EMA", "UCB", "EXP3", "ABR", or "MWU"
 
     # EMA policy parameters
@@ -45,11 +48,18 @@ class ExperimentConfig:
 
     # EXP3 policy parameters
     exp3_gamma: float = 0.07
+    gamma: float = 0.05  # uniform exploration mixing parameter
+    exp3_eta: Optional[float] = None
+    gamma_schedule: str = "static"  # "static" | "exponential" | "sqrt_decay" | "linear"
+    gamma_min: float = 0.01  # exploration floor for decaying schedules
+    gamma_decay: float = 0.0002  # rate constant for exponential schedule
+    norm_alpha: float = 0.0  # EMA rate for adaptive normalisation (0 = disabled)
 
     # Asynchronous better-response parameters
     improvement_threshold_pct: float = 0.0
     utility_eval_time_steps: int = 200
     abr_max_updates: Optional[int] = None
+    n_t: int = 100  # number of time discretisation points for the analytical integral
 
     # MWU parameters
     mwu_eta: float = 0.1
@@ -60,6 +70,8 @@ class ExperimentConfig:
     n_slots: int = 10000
     delta: float = 12.0
     n_runs: int = 1
+    initial_placement: str = "dispersed"  # "dispersed", "random", or "concentrated"
+    placement_seed: int = PRIMARY_SEED
 
     # Output configuration
     save_results: bool = True
@@ -107,16 +119,36 @@ def load_config(path) -> ExperimentConfig:
     elif dataset_type == "synthetic":
         region_names = ds["region_names"]
         n = len(region_names)
-        dist = np.array([[abs(r - s) for s in range(n)] for r in range(n)], dtype=float)
-        latency_mean = 0.1 + 0.05 * dist
-        latency_std  = 0.05 + 0.02 * dist
+        topology = ds.get("latency_topology", "linear")
+        if topology == "linear":
+            dist = np.array([[abs(r - s) for s in range(n)] for r in range(n)], dtype=float)
+        elif topology == "flat":
+            # All off-diagonal pairs have the same distance (fully symmetric)
+            dist = np.ones((n, n), dtype=float)
+            np.fill_diagonal(dist, 0.0)
+        elif topology == "zero":
+            # Instant propagation everywhere
+            dist = np.zeros((n, n), dtype=float)
+        else:
+            raise ValueError(f"Unknown latency_topology: {topology!r}. Use 'linear', 'flat', or 'zero'.")
+        latency_mean_base = ds.get("latency_mean_base", 0.1)
+        latency_mean_scale = ds.get("latency_mean_scale", 0.05)
+        latency_std_base = ds.get("latency_std_base", 0.05)
+        latency_std_scale = ds.get("latency_std_scale", 0.02)
+        latency_mean = latency_mean_base + latency_mean_scale * dist
+        latency_std  = latency_std_base  + latency_std_scale  * dist
+        source_region_indices = ds.get("source_regions", list(range(n)))
         sources_config = [
-            (f"Src_{name}", i, ds.get("lambda_rate", 5.0),
+            (f"Src_{region_names[i]}", i, ds.get("lambda_rate", 5.0),
              ds.get("mu_val", 1.0), ds.get("sigma_val", 0.5))
-            for i, name in enumerate(region_names)
+            for i in source_region_indices
         ]
+        latency_mean = latency_mean[:, source_region_indices]
+        latency_std  = latency_std[:, source_region_indices]
     else:
         raise ValueError(f"Unknown dataset type: {dataset_type!r}")
+
+    propagation_model_type = "fixed" if dataset_type == "synthetic" else "lognormal"
 
     return ExperimentConfig(
         name=raw["name"],
@@ -125,6 +157,7 @@ def load_config(path) -> ExperimentConfig:
         sources_config=sources_config,
         latency_mean=latency_mean,
         latency_std=latency_std,
+        propagation_model_type=propagation_model_type,
         n_builders=sim["n_builders"],
         n_slots=sim["n_slots"],
         delta=sim.get("delta", 12.0),
@@ -134,12 +167,21 @@ def load_config(path) -> ExperimentConfig:
         beta_reg=pol.get("beta_reg", 1.5),
         cost_c=pol.get("cost_c", 0.0),
         alpha=pol.get("alpha", 2.0),
-        exp3_gamma=pol.get("exp3_gamma", 0.07),
+        exp3_gamma=pol.get("exp3_gamma", pol.get("gamma", 0.07)),
+        gamma=pol.get("gamma", pol.get("exp3_gamma", 0.05)),
+        exp3_eta=pol.get("eta"),
+        gamma_schedule=pol.get("gamma_schedule", "static"),
+        gamma_min=pol.get("gamma_min", 0.01),
+        gamma_decay=pol.get("gamma_decay", 0.0002),
+        norm_alpha=pol.get("norm_alpha", 0.0),
         improvement_threshold_pct=pol.get("improvement_threshold_pct", 0.0),
-        utility_eval_time_steps=pol.get("utility_eval_time_steps", 200),
+        utility_eval_time_steps=pol.get("utility_eval_time_steps", pol.get("n_t", 200)),
         abr_max_updates=pol.get("abr_max_updates"),
+        n_t=pol.get("n_t", pol.get("utility_eval_time_steps", 100)),
         mwu_eta=pol.get("mwu_eta", pol.get("eta", 0.1)),
         payoff_normalization=pol.get("payoff_normalization"),
+        placement_seed=sim.get("placement_seed", PRIMARY_SEED),
+        initial_placement=sim.get("initial_placement", "dispersed"),
     )
 
 

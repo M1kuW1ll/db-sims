@@ -1,0 +1,26 @@
+name: abr_sym_linear_crowded
+
+# linear topology, 10 builders, 10 regions, 5 sources
+# Sources at even indices [0,2,4,6,8] — symmetric around centre.
+
+dataset:
+  type: synthetic
+  region_names: [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]
+  latency_topology: linear
+  latency_mean_base: 0.1
+  latency_mean_scale: 1.0
+  source_regions: [0, 2, 4, 6, 8]
+  # the following parameters are based on block data from 19-09-2025 to 19-03-2026
+  lambda_rate: 4.28  # total 21.42 / 5 sources
+  mu_val: -11.29
+  sigma_val: 1.86
+
+simulation:
+  n_builders: 10
+  n_slots: 100
+  delta: 12.0
+  n_runs: 5
+
+policy:
+  type: ABR
+  n_t: 100

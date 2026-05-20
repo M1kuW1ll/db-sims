@@ -7,8 +7,8 @@ from analysis.result import ExperimentResult
 from analysis.poa import compute_poa_stats
 from sim.simulator import (
     Region, Source, Builder, LocationGamesSimulator,
-    EMASoftmaxPolicy, EXP3Policy, FixedPolicy, UCBPolicy, StochasticTransactionGenerator,
-    LatencyPropagationModel, EqualSplitSharingRule,
+    EMASoftmaxPolicy, UCBPolicy, FixedPolicy, EXP3Policy, StochasticTransactionGenerator,
+    LatencyPropagationModel, FixedLatencyPropagationModel, EqualSplitSharingRule,
 )
 
 def get_preset_config(preset_name: str) -> ExperimentConfig:
@@ -69,6 +69,7 @@ def get_preset_config(preset_name: str) -> ExperimentConfig:
             ],
             policy_type="EXP3",
             exp3_gamma=0.07,
+            gamma=0.07,
             n_builders=8,
             n_slots=10000
         ),
@@ -147,16 +148,17 @@ def _run_single(config: ExperimentConfig, seed: int,
                 initial_belief=initial_belief,
             )
         elif config.policy_type == "EXP3":
-            payoff_normalization = (
-                config.payoff_normalization
-                if config.payoff_normalization is not None and config.payoff_normalization > 0
-                else initial_belief
-            )
             policy = EXP3Policy(
                 config.n_regions,
-                gamma=config.exp3_gamma,
-                payoff_normalization=payoff_normalization,
+                eta=config.exp3_eta,
+                gamma=config.gamma,
                 initial_belief=initial_belief,
+                payoff_normalization=config.payoff_normalization,
+                gamma_schedule=config.gamma_schedule,
+                gamma_min=config.gamma_min,
+                gamma_decay=config.gamma_decay,
+                total_slots=config.n_slots,
+                norm_alpha=config.norm_alpha,
             )
         elif config.policy_type in {"ABR", "MWU"}:
             policy = FixedPolicy(config.n_regions, initial_belief=initial_belief)
@@ -169,10 +171,16 @@ def _run_single(config: ExperimentConfig, seed: int,
         sources=sources,
         builders=builders,
         tx_generator=StochasticTransactionGenerator(),
-        propagation_model=LatencyPropagationModel(latency_mean, latency_std),
+        propagation_model=(
+            FixedLatencyPropagationModel(latency_mean)
+            if config.propagation_model_type == "fixed"
+            else LatencyPropagationModel(latency_mean, latency_std)
+        ),
         sharing_rule=EqualSplitSharingRule(),
         delta=config.delta,
         seed=seed,
+        placement_seed=config.placement_seed,
+        initial_placement=config.initial_placement,
     )
     if config.policy_type in {"EMA", "UCB", "EXP3"}:
         sim.run(config.n_slots)
@@ -244,8 +252,8 @@ def run_experiment(config: ExperimentConfig, verbose: bool = True,
         result.poa_stats = compute_poa_stats(result, method=poa_method)
         if verbose:
             p = result.poa_stats
-            print(f"W* (optimal): {p['w_star']:.4f}")
-            print(f"W  (learned): {p['w_learned']:.4f}")
+            print(f"W* (optimal): {p['w_star']:.6f}")
+            print(f"W (converged): {p['w_converged']:.6f}")
             print(f"PoA: {p['poa']:.4f}")
             print(f"Optimal profile: {p['opt_profile_names']}")
 
@@ -272,16 +280,14 @@ def print_results(result: ExperimentResult, regions: List[Region], sources: List
         print(f"ABR converged to pure NE: {stats['abr_converged']}")
         print(f"ABR max profitable deviation: {stats['abr_max_profitable_deviation']:.6f}")
 
-    print(f"\nBuilder distribution across regions (avg over time):")
-    for i, count in enumerate(stats['avg_builder_distribution']):
-        print(f"  {regions[i].name:15s}: {count:6.2f} builders")
-
     print(f"\nRegion selection per slot (avg builders per slot):")
     for i, count in enumerate(stats['avg_region_counts']):
-        print(f"  {regions[i].name:15s}: {count:6.2f}")
+        print(f"  {regions[i].name}: {count:.2f}")
 
-    print(f"\nDiversity metrics:")
-    print(f"  Builder Dist Gini:    {stats['builder_dist_gini']:.4f} (lower = more equal)")
-    print(f"  Builder Dist Entropy: {stats['builder_dist_entropy']:.4f} (higher = more equal)")
-    print(f"  Region Gini:           {stats['region_gini']:.4f}")
-    print(f"  Region Entropy:        {stats['region_entropy']:.4f}")
+    print(f"\nConcentration metrics (converged profile):")
+    print(f"  Location Gini: {stats['location_gini']:.4f}")
+    print(f"  Location Entropy: {stats['location_entropy']:.4f}")
+    print(f"  Location HHI: {stats['location_hhi']:.4f}")
+    print(f"  Utility Gini: {stats['utility_gini']:.4f}")
+    print(f"  Utility Entropy: {stats['utility_entropy']:.4f}")
+    print(f"  Utility HHI: {stats['utility_hhi']:.4f}")

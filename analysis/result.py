@@ -4,6 +4,7 @@ from typing import Optional
 
 import numpy as np
 from sim.config import ExperimentConfig
+from sim.metrics import gini, entropy, hhi
 from sim.simulator import LocationGamesSimulator
 
 
@@ -23,6 +24,7 @@ class ExperimentResult:
         self.welfare_history = np.array(simulator.welfare_history)
         self.tx_emitted_history = np.array(simulator.tx_emitted_history)
         self.tx_received_history = np.array(simulator.tx_received_history)
+        self.builder_rewards_history = np.array(simulator.reward_history)
 
         self.poa_stats = None  # populated by compute_poa_stats if requested
 
@@ -30,34 +32,14 @@ class ExperimentResult:
         self._compute_time_series_metrics()
 
     def _compute_time_series_metrics(self):
-        """Compute Gini, entropy, HHI, volatility, value-capture, etc. over time."""
+        """Compute location and utility concentration metrics over time."""
 
-        # Helper functions
-        def gini(x):
-            sorted_x = np.sort(x)
-            n = len(x)
-            if np.sum(x) == 0:
-                return 0.0
-            cumsum = np.cumsum(sorted_x)
-            return (2 * np.sum((np.arange(1, n+1)) * sorted_x)) / (n * cumsum[-1]) - (n + 1) / n
+        n_builders = self.builder_rewards_history.shape[1] if self.builder_rewards_history.ndim == 2 else self.config.n_builders
+        n_regions = self.config.n_regions
 
-        def entropy(counts):
-            """Normalized entropy: H(p) / log(n)"""
-            total = np.sum(counts)
-            if total == 0:
-                return 0.0
-            probs = counts / total
-            probs = probs[probs > 0]
-            n = len(counts)
-            return -np.sum(probs * np.log(probs)) / np.log(n) if len(probs) > 0 and n > 1 else 0.0
-
-        def hhi(counts):
-            """Herfindahl-Hirschman Index: sum of squared shares"""
-            total = np.sum(counts)
-            if total == 0:
-                return 0.0
-            shares = counts / total
-            return np.sum(shares ** 2)
+        self.location_gini_over_time = []
+        self.location_entropy_over_time = []
+        self.location_hhi_over_time = []
 
         def top_k_concentration(counts, k):
             """Top-k concentration: sum of top k shares"""
@@ -72,15 +54,9 @@ class ExperimentResult:
             """L1 distance between two distributions"""
             return np.sum(np.abs(p1 - p2))
 
-        # Initialize metric lists
-        self.region_gini_over_time = []
-        self.region_entropy_over_time = []
-        self.builder_dist_gini_over_time = []
-        self.builder_dist_entropy_over_time = []
-
-        # HHI metrics
-        self.region_hhi_over_time = []
-        self.builder_dist_hhi_over_time = []
+        self.utility_gini_over_time = []
+        self.utility_entropy_over_time = []
+        self.utility_hhi_over_time = []
 
         # Value-capture metrics
         self.value_capture_by_region = []
@@ -99,16 +75,24 @@ class ExperimentResult:
         prev_builder_shares = None
         prev_value_shares = None
 
-        n_regions = self.config.n_regions
-
         for t in range(len(self.region_counts)):
-            self.region_gini_over_time.append(gini(self.region_counts[t]))
-            self.region_entropy_over_time.append(entropy(self.region_counts[t]))
-            self.builder_dist_gini_over_time.append(gini(self.builder_distribution[t]))
-            self.builder_dist_entropy_over_time.append(entropy(self.builder_distribution[t]))
+            # Location metrics
+            builder_dist_t = self.builder_distribution[t]
+            self.location_gini_over_time.append(gini(builder_dist_t))
+            self.location_entropy_over_time.append(entropy(builder_dist_t))
+            self.location_hhi_over_time.append(hhi(builder_dist_t))
 
-            self.region_hhi_over_time.append(hhi(self.region_counts[t]))
-            self.builder_dist_hhi_over_time.append(hhi(self.builder_distribution[t]))
+            # Utility metrics from observed rewards for each builder
+            rewards_t = self.builder_rewards_history[t]
+            total_reward = float(np.sum(rewards_t))
+            if total_reward == 0:
+                self.utility_hhi_over_time.append(1.0 / n_builders)
+                self.utility_gini_over_time.append(0.0)
+                self.utility_entropy_over_time.append(1.0)
+            else:
+                self.utility_hhi_over_time.append(hhi(rewards_t))
+                self.utility_gini_over_time.append(gini(rewards_t))
+                self.utility_entropy_over_time.append(entropy(rewards_t))
 
             value_by_region = np.zeros(n_regions)
             for region_id, reward in self.region_reward_pairs[t]:
@@ -128,8 +112,8 @@ class ExperimentResult:
             region_total = np.sum(self.region_counts[t])
             current_region_shares = self.region_counts[t] / region_total if region_total > 0 else np.zeros(n_regions)
 
-            builder_total = np.sum(self.builder_distribution[t])
-            current_builder_shares = self.builder_distribution[t] / builder_total if builder_total > 0 else np.zeros(n_regions)
+            builder_total = np.sum(builder_dist_t)
+            current_builder_shares = builder_dist_t / builder_total if builder_total > 0 else np.zeros(n_regions)
 
             self.region_volatility_over_time.append(l1_distance(current_region_shares, prev_region_shares) if prev_region_shares is not None else 0.0)
             self.builder_dist_volatility_over_time.append(l1_distance(current_builder_shares, prev_builder_shares) if prev_builder_shares is not None else 0.0)
@@ -221,12 +205,13 @@ class ExperimentResult:
             welfare_history=self.welfare_history,
             tx_emitted_history=self.tx_emitted_history,
             tx_received_history=self.tx_received_history,
-            region_gini_over_time=np.array(self.region_gini_over_time),
-            region_entropy_over_time=np.array(self.region_entropy_over_time),
-            builder_dist_gini_over_time=np.array(self.builder_dist_gini_over_time),
-            builder_dist_entropy_over_time=np.array(self.builder_dist_entropy_over_time),
-            region_hhi_over_time=np.array(self.region_hhi_over_time),
-            builder_dist_hhi_over_time=np.array(self.builder_dist_hhi_over_time),
+            builder_rewards_history=self.builder_rewards_history,
+            location_gini_over_time=np.array(self.location_gini_over_time),
+            location_entropy_over_time=np.array(self.location_entropy_over_time),
+            location_hhi_over_time=np.array(self.location_hhi_over_time),
+            utility_gini_over_time=np.array(self.utility_gini_over_time),
+            utility_entropy_over_time=np.array(self.utility_entropy_over_time),
+            utility_hhi_over_time=np.array(self.utility_hhi_over_time),
             value_capture_by_region=self.value_capture_by_region,
             value_share_distribution=self.value_share_distribution,
             value_share_hhi_over_time=np.array(self.value_share_hhi_over_time),
@@ -261,13 +246,23 @@ class ExperimentResult:
         result.welfare_history = data.get('welfare_history', np.array([]))
         result.tx_emitted_history = data.get('tx_emitted_history', np.array([]))
         result.tx_received_history = data.get('tx_received_history', np.array([]))
+        result.builder_rewards_history = data.get('builder_rewards_history', np.array([]))
         result.region_reward_pairs = []
-        result.region_gini_over_time = list(data['region_gini_over_time'])
-        result.region_entropy_over_time = list(data['region_entropy_over_time'])
-        result.builder_dist_gini_over_time = list(data['builder_dist_gini_over_time'])
-        result.builder_dist_entropy_over_time = list(data['builder_dist_entropy_over_time'])
-        result.region_hhi_over_time = list(data.get('region_hhi_over_time', []))
-        result.builder_dist_hhi_over_time = list(data.get('builder_dist_hhi_over_time', []))
+        result.poa_stats = None
+
+        # Location metrics (support old key names for backward compat)
+        result.location_gini_over_time = list(
+            data.get('location_gini_over_time', data.get('builder_dist_gini_over_time', []))
+        )
+        result.location_entropy_over_time = list(
+            data.get('location_entropy_over_time', data.get('builder_dist_entropy_over_time', []))
+        )
+        result.location_hhi_over_time = list(
+            data.get('location_hhi_over_time', data.get('builder_dist_hhi_over_time', []))
+        )
+        result.utility_gini_over_time = list(data.get('utility_gini_over_time', []))
+        result.utility_entropy_over_time = list(data.get('utility_entropy_over_time', []))
+        result.utility_hhi_over_time = list(data.get('utility_hhi_over_time', []))
         result.value_capture_by_region = data.get('value_capture_by_region', np.array([]))
         result.value_share_distribution = data.get('value_share_distribution', np.array([]))
         result.value_share_hhi_over_time = list(data.get('value_share_hhi_over_time', []))

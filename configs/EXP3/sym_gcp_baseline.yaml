@@ -1,0 +1,63 @@
+name: exp3_sym_gcp_baseline
+
+dataset:
+  type: gcp_subset
+  subset_regions:
+    # North America
+    - us-east1
+    - us-central1
+    - us-west1
+    - northamerica-northeast1
+    # South America
+    - southamerica-east1
+    - southamerica-west1
+    # Europe
+    - europe-west1
+    - europe-west3
+    - europe-north1
+    - europe-central2
+    - europe-southwest1
+    # Middle East
+    - me-central1
+    - me-west1
+    # Africa
+    - africa-south1
+    # Asia
+    - asia-south1
+    - asia-east1
+    - asia-northeast1
+    - asia-southeast1
+    # Australia
+    - australia-southeast1
+    - australia-southeast2
+  source_regions:
+    - us-east1
+    - us-west1
+    - southamerica-east1
+    - europe-west1
+    - europe-north1
+    - africa-south1
+    - asia-south1
+    - asia-northeast1
+    - asia-southeast1
+    - australia-southeast1
+  lambda_rate: 2.14
+  mu_val: -11.29
+  sigma_val: 1.86
+
+simulation:
+  n_builders: 2
+  n_slots: 15000
+  delta: 0.05
+  n_runs: 1
+
+policy:
+  type: EXP3
+  eta: 0.05
+  gamma: 0.5
+  gamma_schedule: exponential
+  gamma_min: 0.002
+  gamma_decay: 0.0005
+  norm_alpha: 0.01
+  n_t: 100
+  
