@@ -42,7 +42,7 @@ Results and plots are saved to `results/`.
 
 ### Learning Algorithms
 
-There are also stochastic learning policies (EXP3, EMA-Softmax, UCB) available via `policy_type`. These are useful for studying out-of-equilibrium dynamics that may not have the same convergence guarantees.
+The EXP3 bandit policy is also available via `policy_type: EXP3`. It is useful for studying out-of-equilibrium dynamics but does not have the same convergence guarantees as ABR.
 
 ## Experiments
 
@@ -62,13 +62,12 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 
 | Parameter | Description |
 |---|---|
-| `policy_type` | `"ABR"`, `"EXP3"`, `"EMA"`, or `"UCB"` |
+| `policy_type` | `"ABR"` or `"EXP3"` |
 | `n_builders` | Number of builders |
 | `n_slots` | Number of simulation slots |
 | `delta` | Slot duration (seconds) |
-| `eta`, `beta_reg` | EMA learning rate and softmax temperature |
-| `alpha` | UCB exploration bonus |
-| `cost_c` | Migration cost |
+| `eta` | EXP3 learning rate |
+| `gamma`, `gamma_schedule` | EXP3 exploration rate (uniform mixture weight) and decay schedule |
 
 ## Metrics
 
@@ -78,7 +77,7 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 - **Cluster coverage**: fraction of expected value captured from each information source cluster
 - **Mean pairwise distance**: geographic spread of the converged builder placement
 
-**Analysis pipeline (`run.py` + `analysis/`), used with learning algorithms:**
+**Analysis pipeline (`run.py` + `analysis/`):**
 - Gini, entropy, HHI of location and utility distributions (time series)
 - Value-capture HHI, top-1/top-3 concentration
 - Volatility: L1 change in region and value-share distributions between slots

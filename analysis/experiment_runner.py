@@ -7,79 +7,9 @@ from analysis.result import ExperimentResult
 from analysis.poa import compute_poa_stats
 from sim.simulator import (
     Region, Source, Builder, LocationGamesSimulator,
-    EMASoftmaxPolicy, UCBPolicy, FixedPolicy, EXP3Policy, StochasticTransactionGenerator,
+    FixedPolicy, EXP3Policy, StochasticTransactionGenerator,
     LatencyPropagationModel, FixedLatencyPropagationModel, EqualSplitSharingRule,
 )
-
-def get_preset_config(preset_name: str) -> ExperimentConfig:
-    """Get a predefined experiment configuration."""
-
-    presets = {
-        "small_uniform": ExperimentConfig(
-            name="small_uniform",
-            n_regions=3,
-            region_names=["West", "Central", "East"],
-            sources_config=[
-                ("Oracle1", 0, 5.0, 1.0, 0.5),
-                ("Oracle2", 1, 5.0, 1.0, 0.5),
-                ("Oracle3", 2, 5.0, 1.0, 0.5),
-            ],
-            policy_type="EMA",
-            n_builders=6,
-            n_slots=5000
-        ),
-
-        "large_diverse": ExperimentConfig(
-            name="large_diverse",
-            n_regions=5,
-            region_names=["West", "CentralWest", "Central", "CentralEast", "East"],
-            sources_config=[
-                ("FastOracle", 0, 8.0, 0.8, 0.4),
-                ("BalancedOracle", 2, 5.0, 1.0, 0.5),
-                ("PremiumOracle", 4, 3.0, 1.5, 0.6),
-            ],
-            policy_type="EMA",
-            eta=0.12,
-            beta_reg=1.5,
-            n_builders=8,
-            n_slots=10000
-        ),
-
-        "ucb_exploration": ExperimentConfig(
-            name="ucb_exploration",
-            n_regions=5,
-            sources_config=[
-                ("Source1", 0, 6.0, 1.0, 0.5),
-                ("Source2", 2, 4.0, 1.2, 0.5),
-                ("Source3", 4, 3.0, 1.5, 0.5),
-            ],
-            policy_type="UCB",
-            alpha=2.0,
-            n_builders=8,
-            n_slots=10000
-        ),
-
-        "high_migration_cost": ExperimentConfig(
-            name="high_migration_cost",
-            n_regions=5,
-            sources_config=[
-                ("Source1", 0, 6.0, 1.0, 0.5),
-                ("Source2", 4, 6.0, 1.0, 0.5),
-            ],
-            policy_type="EMA",
-            eta=0.1,
-            beta_reg=2.0,
-            cost_c=0.0,
-            n_builders=8,
-            n_slots=10000
-        )
-    }
-
-    if preset_name not in presets:
-        raise ValueError(f"Unknown preset: {preset_name}. Available: {list(presets.keys())}")
-
-    return presets[preset_name]
-
 
 def _run_single(config: ExperimentConfig, seed: int,
                 regions, sources, latency_mean, latency_std,
@@ -87,17 +17,7 @@ def _run_single(config: ExperimentConfig, seed: int,
     """Run one simulation instance with the given seed and return its result."""
     builders = []
     for i in range(config.n_builders):
-        if config.policy_type == "EMA":
-            policy = EMASoftmaxPolicy(
-                config.n_regions,
-                eta=config.eta,
-                beta=config.beta_reg,
-                cost=config.cost_c,
-                initial_belief=initial_belief,
-            )
-        elif config.policy_type == "UCB":
-            policy = UCBPolicy(config.n_regions, alpha=config.alpha, initial_belief=initial_belief)
-        elif config.policy_type == "EXP3":
+        if config.policy_type == "EXP3":
             policy = EXP3Policy(
                 config.n_regions,
                 eta=config.eta,

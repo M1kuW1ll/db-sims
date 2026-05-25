@@ -4,10 +4,6 @@ Decentralized Building Simulator (db-sims) - Core simulation engine
 
 Inspired by GeoDec research, generalized for studying location choice in various
 distributed and decentralized block building regimes.
-
-Implements two interchangeable learning policies:
-  (A) EMA + softmax
-  (B) Individual UCB bandit
 """
 from collections import defaultdict
 
@@ -63,97 +59,6 @@ class LearningPolicy(ABC):
     def get_name(self) -> str:
         """Return policy name for logging."""
         pass
-
-
-class EMASoftmaxPolicy(LearningPolicy):
-    """
-    Policy A: EMA + softmax.
-    Individual scoreboard per builder.
-    """
-
-    def __init__(self, n_regions: int, eta: float = 0.1,
-                 beta: float = 2.0,
-                 cost: float = 0.0,
-                 initial_belief: float = 0.0):
-        """
-        Args:
-            eta: EMA learning rate
-            beta: Temperature for region selection
-            cost: Migration cost (subtracted from region score)
-        """
-        super().__init__(n_regions, initial_belief)
-        self.eta = eta
-        self.beta = beta
-        self.cost = cost
-
-    def choose(self, current_region: int) -> int:
-        """Two-stage softmax selection."""
-        # Stage 1: Choose region
-        U_reg = self.beliefs
-
-        # Softmax over regions
-        # we subtract the largest value to ensure no overflow
-        shifted = self.beta * (U_reg - np.max(U_reg))
-        exp_scores = np.exp(shifted)
-        probs_reg = exp_scores / np.sum(exp_scores)
-        region_id = np.random.choice(len(self.beliefs), p=probs_reg)
-
-        if U_reg[region_id] - U_reg[current_region] <= self.cost:
-            return current_region
-
-        return region_id
-
-    def update(self, region_id: int, reward: float):
-        """EMA update: beliefs(r) <- (1-eta)*beliefs(r) + eta*R."""
-        self.beliefs[region_id] = (
-            (1 - self.eta) * self.beliefs[region_id] +
-            self.eta * reward
-        )
-
-    def get_name(self) -> str:
-        return "EMA-Softmax"
-
-
-class UCBPolicy(LearningPolicy):
-    """
-    Policy B: Individual UCB bandit.
-    Arms are regions.
-    """
-
-    def __init__(self, n_regions: int, alpha: float = 1.0, cost: float = 0.0,
-                 initial_belief: float = 0.0):
-        """
-        Args:
-            alpha: Exploration parameter
-            cost: Migration cost
-        """
-        super().__init__(n_regions, initial_belief)
-        self.alpha = alpha
-        self.cost = cost
-
-        self.N = np.zeros(len(self.beliefs))
-        self.t = 0  # Local clock
-
-    def choose(self, current_region: int) -> int:
-        """UCB selection: argmax [beliefs(r) + alpha*sqrt(log(1+t)/(1+N(r,I)))]."""
-        # Compute UCB scores
-        exploration_bonus = self.alpha * np.sqrt(
-            np.log(1 + self.t) / (1 + self.N)
-        )
-        ucb_scores = self.beliefs + exploration_bonus
-
-        region_id = np.argmax(ucb_scores)
-        if ucb_scores[region_id] - ucb_scores[current_region] <= self.cost:
-            return current_region
-        return region_id
-
-    def update(self, region_id: int, reward: float):
-        self.N[region_id] += 1
-        self.beliefs[region_id] += (reward - self.beliefs[region_id]) / self.N[region_id]
-        self.t += 1
-
-    def get_name(self) -> str:
-        return "UCB"
 
 
 class FixedPolicy(LearningPolicy):
@@ -428,8 +333,8 @@ class LocationGamesSimulator:
     Core simulator for studying location choice in decentralized block building.
 
     Implements reward sharing among builders based on their chosen regions and the transactions they capture
-    which are generated stochastically from information sources. Builders learn and adapt their region choices 
-    over time based on observed rewards, using either an EMA-softmax policy or a UCB bandit policy.
+    which are generated stochastically from information sources. Builders learn and adapt their region choices
+    over time based on observed rewards.
     """
 
     def __init__(self,

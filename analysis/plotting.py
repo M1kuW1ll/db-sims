@@ -301,10 +301,6 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
 
     # Main title
     policy_info = result.config.policy_type
-    if result.config.policy_type == "EMA":
-        policy_info += f" (η={result.config.eta}, β_reg={result.config.beta_reg}, c={result.config.cost_c})"
-    elif result.config.policy_type == "UCB":
-        policy_info += f" (α={result.config.alpha})"
 
     fig.suptitle(f'Experiment: {result.config.name} | {policy_info}',
                  fontsize=13, fontweight='bold')

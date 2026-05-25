@@ -6,11 +6,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from sim.simulator import (
-    Builder, EqualSplitSharingRule, EMASoftmaxPolicy,
+    Builder, EqualSplitSharingRule, FixedPolicy,
     LatencyPropagationModel, LocationGamesSimulator,
     Region, Source, StochasticTransactionGenerator, Transaction,
 )
-from experiment_runner import ExperimentConfig, create_scenario_from_config
+from sim.config import ExperimentConfig, create_scenario_from_config
 
 
 class TestEqualSplitSharing(unittest.TestCase):
@@ -105,7 +105,7 @@ class TestWelfare(unittest.TestCase):
         latency_std = np.array([[1.0], [1.0]])
         model = LatencyPropagationModel(latency_mean, latency_std)
 
-        builders = [Builder(i, EMASoftmaxPolicy(2)) for i in range(4)]
+        builders = [Builder(i, FixedPolicy(2)) for i in range(4)]
         sim = LocationGamesSimulator(
             regions=regions,
             sources=sources,

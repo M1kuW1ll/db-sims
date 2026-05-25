@@ -4,9 +4,9 @@ CLI entrypoint for running experiments
 
 Usage:
     python run.py configs/  # run all YAML files in a directory
-    python run.py configs/ema_baseline.yaml  # run a single config file
-    python run.py configs/ema_baseline.yaml --poa  # also compute PoA (default: brute-force method)
-    python run.py configs/ema_baseline.yaml --poa --poa-method greedy  # use greedy method for PoA
+    python run.py configs/ABR/sym_linear_equal.yaml  # run a single config file
+    python run.py configs/ABR/sym_linear_equal.yaml --poa  # also compute PoA (default: brute-force method)
+    python run.py configs/ABR/sym_linear_equal.yaml --poa --poa-method greedy  # use greedy method for PoA
 """
 
 import argparse
