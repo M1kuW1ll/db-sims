@@ -118,7 +118,7 @@ def compare_experiments(results: List[ExperimentResult],
         exp_names = "_vs_".join([r.config.name[:15] for r in results[:3]])  # Limit to first 3 names
         if len(results) > 3:
             exp_names += f"_and_{len(results)-3}_more"
-        results_dir = Path(result.config.results_dir)
+        results_dir = Path(results[0].config.results_dir)
         results_dir.mkdir(exist_ok=True)
         filename = results_dir / f'comparison_{exp_names}.png'
         plt.savefig(filename, dpi=150, bbox_inches='tight')

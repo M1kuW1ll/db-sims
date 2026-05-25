@@ -3,7 +3,6 @@ import math
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pathlib import Path
 import numpy as np
 
 from sim.datasets import load_gcp, subregion
@@ -461,36 +460,6 @@ def cluster_coverage_fraction(profile: list, sources: list,
     return covered_weight / total_weight if total_weight > 1e-12 else 0.0
 
 
-# Initialisation helpers for Experiment 3
-
-def best_response_region(sources: list, prop: PropagationModel,
-                          delta: float, n_regions: int, n_t: int = 200) -> int:
-    """Region that maximises a lone builder's analytical expected reward (monopolist)."""
-    # Lone builder: sharing weight = 1 for every (source, time) - no competition.
-    weights_empty = np.ones((len(sources), n_t))
-    rewards = [
-        compute_expected_reward(r, weights_empty, sources, prop, delta, n_t)
-        for r in range(n_regions)
-    ]
-    return int(np.argmax(rewards))
-
-
-def farthest_first_regions(K: int, n_regions: int,
-                            full_latency_mean: np.ndarray) -> list:
-    """Greedy farthest-first selection of K regions using the latency matrix.
-
-    Starts from the region with maximum total outgoing latency (most peripheral)
-    and repeatedly adds the region farthest from the current selected set.
-    """
-    start = int(np.argmax(full_latency_mean.sum(axis=1)))
-    selected = [start]
-    while len(selected) < K:
-        min_dists = np.min(full_latency_mean[selected, :], axis=0)
-        for r in selected:
-            min_dists[r] = -1.0  # exclude already selected
-        selected.append(int(np.argmax(min_dists)))
-    return selected
-
 def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
                  regions: list, delta: float, init_regions: list, seed: int,
                  n_t: int = 100, max_rounds: int = 4000, n_t_final: int = 200,
@@ -541,22 +510,6 @@ def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
         "cov_peripheral": cluster_coverage_fraction(
             final_profile, sources, sliced_prop, delta, peri_ids, n_t=n_t_final),
     }
-
-
-def run_abr_seeds(K: int, sources: list, sliced_prop: PropagationModel,
-                  regions: list, delta: float, n_seeds: int = 10,
-                  n_t: int = 100, max_rounds: int = 4000, n_t_final: int = 200,
-                  seed_base: int = 0) -> list:
-    """Run ABR from n_seeds independent random initialisations. Returns list of result dicts."""
-    n_regions = len(regions)
-    results = []
-    for seed in range(seed_base, seed_base + n_seeds):
-        rng = np.random.default_rng(seed)
-        init_regions = [int(rng.integers(0, n_regions)) for _ in range(K)]
-        r = run_abr_full(K, sources, sliced_prop, regions, delta, init_regions,
-                         seed=seed, n_t=n_t, max_rounds=max_rounds, n_t_final=n_t_final)
-        results.append(r)
-    return results
 
 
 def compute_opt_sliced(K: int, sources: list, sliced_prop: PropagationModel,
