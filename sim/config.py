@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from sim.datasets import gcp_sources, load_gcp, subregion
-from sim.simulator import Region, Source
+from sim.simulator import ABR_RESPONSE_RULES, ABR_UPDATE_MODES, Region, Source
 
 PRIMARY_SEED = 0
 
@@ -55,11 +55,14 @@ class ExperimentConfig:
     gamma_decay: float = 0.0002  # rate constant for exponential schedule
     norm_alpha: float = 0.0  # EMA rate for adaptive normalisation (0 = disabled)
 
-    # Asynchronous better-response parameters
+    # Exact-response parameters
     improvement_threshold_pct: float = 0.0
     utility_eval_time_steps: int = 200
     abr_max_updates: Optional[int] = None
+    abr_max_rounds: Optional[int] = None
     n_t: int = 100  # number of time discretisation points for the analytical integral
+    abr_response_rule: str = "best"
+    abr_update_mode: str = "async"
 
     # MWU parameters
     mwu_eta: float = 0.1
@@ -87,6 +90,19 @@ class ExperimentConfig:
                 ("SourceB", self.n_regions // 2, 5.0, 1.0, 0.5),
                 ("SourceC", self.n_regions - 1, 5.0, 1.0, 0.5),
             ]
+
+        self.abr_response_rule = self.abr_response_rule.lower()
+        if self.abr_response_rule not in ABR_RESPONSE_RULES:
+            raise ValueError(
+                f"Unknown ABR response rule: {self.abr_response_rule!r}. "
+                "Expected 'best' or 'better'."
+            )
+        self.abr_update_mode = self.abr_update_mode.lower()
+        if self.abr_update_mode not in ABR_UPDATE_MODES:
+            raise ValueError(
+                f"Unknown ABR update mode: {self.abr_update_mode!r}. "
+                "Expected 'async' or 'simultaneous'."
+            )
 
 # YAML config loading
 def load_config(path) -> ExperimentConfig:
@@ -177,7 +193,10 @@ def load_config(path) -> ExperimentConfig:
         improvement_threshold_pct=pol.get("improvement_threshold_pct", 0.0),
         utility_eval_time_steps=pol.get("utility_eval_time_steps", pol.get("n_t", 200)),
         abr_max_updates=pol.get("abr_max_updates"),
+        abr_max_rounds=pol.get("abr_max_rounds"),
         n_t=pol.get("n_t", pol.get("utility_eval_time_steps", 100)),
+        abr_response_rule=pol.get("abr_response_rule", "best"),
+        abr_update_mode=pol.get("abr_update_mode", "async"),
         mwu_eta=pol.get("mwu_eta", pol.get("eta", 0.1)),
         payoff_normalization=pol.get("payoff_normalization"),
         placement_seed=sim.get("placement_seed", PRIMARY_SEED),

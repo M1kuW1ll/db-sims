@@ -185,12 +185,22 @@ def _run_single(config: ExperimentConfig, seed: int,
     if config.policy_type in {"EMA", "UCB", "EXP3"}:
         sim.run(config.n_slots)
     elif config.policy_type == "ABR":
-        sim.run_async_better_response(
-            config.n_slots,
-            improvement_threshold_pct=config.improvement_threshold_pct,
-            n_time_steps=config.utility_eval_time_steps,
-            max_updates=config.abr_max_updates,
-        )
+        if config.abr_update_mode == "simultaneous":
+            sim.run_simultaneous_better_response(
+                config.n_slots,
+                improvement_threshold_pct=config.improvement_threshold_pct,
+                n_time_steps=config.utility_eval_time_steps,
+                max_rounds=config.abr_max_rounds or config.abr_max_updates,
+                response_rule=config.abr_response_rule,
+            )
+        else:
+            sim.run_async_better_response(
+                config.n_slots,
+                improvement_threshold_pct=config.improvement_threshold_pct,
+                n_time_steps=config.utility_eval_time_steps,
+                max_updates=config.abr_max_updates,
+                response_rule=config.abr_response_rule,
+            )
     elif config.policy_type == "MWU":
         sim.run_mwu(
             config.n_slots,
@@ -275,9 +285,13 @@ def print_results(result: ExperimentResult, regions: List[Region], sources: List
     print(f"Mean txs emitted per round: {stats['mean_txs_emitted_per_round']:.2f}")
     print(f"Mean txs received per round: {stats['mean_txs_received_per_round']:.2f}")
     print(f"Mean coverage ratio: {stats['mean_coverage_ratio']:.4f}")
+    print(f"Empirical epsilon-CCE gap: {stats['cce_gap']:.6f}")
     if result.config.policy_type == "ABR":
+        print(f"ABR update mode: {result.config.abr_update_mode}")
+        print(f"ABR response rule: {result.config.abr_response_rule}")
         print(f"ABR adaptation steps: {stats['abr_adaptation_steps']}")
         print(f"ABR converged to pure NE: {stats['abr_converged']}")
+        print(f"ABR cycle detected: {stats['abr_cycle_detected']}")
         print(f"ABR max profitable deviation: {stats['abr_max_profitable_deviation']:.6f}")
 
     print(f"\nRegion selection per slot (avg builders per slot):")

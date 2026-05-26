@@ -312,7 +312,8 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
         policy_info += f" (γ={result.config.gamma}, norm={norm_str}{eta_str})"
     elif result.config.policy_type == "ABR":
         policy_info += (
-            f" (threshold={100 * result.config.improvement_threshold_pct:.3f}%, "
+            f" (rule={result.config.abr_response_rule}, "
+            f"threshold={100 * result.config.improvement_threshold_pct:.3f}%, "
             f"grid={result.config.utility_eval_time_steps}, "
             f"updates={result.config.abr_max_updates if result.config.abr_max_updates is not None else 'auto'})"
         )
@@ -342,7 +343,7 @@ def print_comparison_table(results: List[ExperimentResult]):
     header_cols = ['Experiment', 'Policy', 'Reward', 'Welfare',
                    'Loc.Gini', 'Loc.Entr', 'Loc.HHI',
                    'Util.Gini', 'Util.Entr', 'Util.HHI',
-                   'Coverage']
+                   'Coverage', 'CCE Gap']
     widths = [25, 8] + [col_w] * (len(header_cols) - 2)
     total_width = sum(widths) + len(widths) - 1
 
@@ -353,7 +354,7 @@ def print_comparison_table(results: List[ExperimentResult]):
               f"{'Reward':<{col_w}} {'Welfare':<{col_w}} "
               f"{'Loc.Gini':<{col_w}} {'Loc.Entr':<{col_w}} {'Loc.HHI':<{col_w}} "
               f"{'Util.Gini':<{col_w}} {'Util.Entr':<{col_w}} {'Util.HHI':<{col_w}} "
-              f"{'Coverage':<{col_w}}")
+              f"{'Coverage':<{col_w}} {'CCE Gap':<{col_w}}")
     print(header)
     print("-" * total_width)
 
@@ -364,7 +365,7 @@ def print_comparison_table(results: List[ExperimentResult]):
             f"{s['avg_reward']:<{col_w}.4f} {s['mean_welfare']:<{col_w}.4f} "
             f"{s['location_gini']:<{col_w}.4f} {s['location_entropy']:<{col_w}.4f} {s['location_hhi']:<{col_w}.4f} "
             f"{s['utility_gini']:<{col_w}.4f} {s['utility_entropy']:<{col_w}.4f} {s['utility_hhi']:<{col_w}.4f} "
-            f"{s['mean_coverage_ratio']:<{col_w}.4f}"
+            f"{s['mean_coverage_ratio']:<{col_w}.4f} {s.get('cce_gap', 0.0):<{col_w}.6f}"
         )
 
     print("=" * total_width)

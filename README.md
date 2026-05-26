@@ -80,7 +80,8 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 | `alpha` | UCB exploration bonus |
 | `gamma` / `exp3_gamma` | EXP3 exploration parameter |
 | `gamma_schedule` | EXP3 exploration schedule (`static`, `exponential`, `sqrt_decay`, or `linear`) |
-| `improvement_threshold_pct` | Relative improvement threshold for strict better response (use `0.0` for exact pure-NE search) |
+| `abr_response_rule` | ABR move rule: `"best"` for argmax best response, `"better"` for a uniformly random improving move |
+| `improvement_threshold_pct` | Relative improvement threshold for ABR moves (use `0.0` for exact pure-NE search) |
 | `utility_eval_time_steps` | Deterministic integration grid size for exact ABR utility evaluation |
 | `abr_max_updates` | Maximum ABR unilateral moves during adaptation before frozen evaluation |
 | `mwu_eta` | MWU learning rate |
@@ -90,7 +91,7 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 ## Dynamics
 
 - `EXP3`: each builder maintains a mixed strategy over regions, samples one region per round, and applies an importance-weighted update using only the realized reward of the sampled region.
-- `ABR`: first runs a pure-profile adaptation phase with asynchronous better responses under exact expected builder utility until no improving move remains or `abr_max_updates` is reached, then freezes the resulting profile and evaluates it over stochastic rounds.
+- `ABR`: first runs a pure-profile adaptation phase under exact expected builder utility, updating builders asynchronously with either argmax best responses (`abr_response_rule: "best"`, the default) or uniformly random better responses (`abr_response_rule: "better"`), until no improving move remains or `abr_max_updates` is reached. It then freezes the resulting profile and evaluates it over stochastic rounds.
 - `MWU`: each builder maintains a mixed strategy over regions, samples an action every round, then updates all region weights using full-information counterfactual realized payoffs from that same stochastic round.
 
 ## Metrics

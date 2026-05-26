@@ -6,11 +6,10 @@ Supported dynamics:
   (A) EMA + softmax
   (B) Individual UCB bandit
   (C) Individual EXP3 bandit
-  (D) Asynchronous strict better response with exact utility evaluation
+  (D) Asynchronous exact-response dynamics (best or better response)
   (E) Full-information multiplicative weights update (MWU)
 """
 from collections import defaultdict
-
 import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -18,6 +17,9 @@ from abc import ABC, abstractmethod
 from sim.metrics import gini, entropy, hhi
 
 from scipy.special import ndtr
+
+ABR_RESPONSE_RULES = {"best", "better"}
+ABR_UPDATE_MODES = {"async", "simultaneous"}
 
 
 @dataclass
@@ -358,6 +360,7 @@ class RoundOutcome:
     rewards: Dict[int, float]
     tx_emitted_count: int
     tx_received_count: int
+    builder_region_receipts: Optional[Dict[int, np.ndarray]] = None
 
 
 def precompute_sharing_weights(
@@ -509,9 +512,15 @@ class LocationGamesSimulator:
         self.tx_emitted_history: List[float] = []
         self.tx_received_history: List[float] = []
         self.abr_adaptation_steps: int = 0
+        self.abr_update_mode: str = "async"
         self.abr_converged: bool = False
         self.abr_final_profile: Optional[List[int]] = None
         self.abr_max_profitable_deviation: float = 0.0
+        self.abr_cycle_detected: bool = False
+        self.abr_cycle_length: Optional[int] = None
+        self.cce_gap_over_time = np.array([], dtype=float)
+        self.cce_gap_by_builder = np.array([], dtype=float)
+        self.cce_best_deviation_regions = np.array([], dtype=int)
 
     def _initialize_builder_distribution(self):
         """Initialize builder locations according to self.initial_placement."""
@@ -578,14 +587,9 @@ class LocationGamesSimulator:
         actual_tx_receivers: Dict[int, List[int]] = {}
         tx_receiving_regions: Dict[int, List[int]] = {}
         all_tx_values: Dict[int, float] = {}
+        builder_region_receipts: Optional[Dict[int, np.ndarray]] = {} if evaluate_all_regions else None
         tx_emitted_counter = 0
         tx_received_counter = 0
-
-        region_to_builders: Dict[int, List[int]] = defaultdict(list)
-        for builder_id, region_id in builder_selected_regions.items():
-            region_to_builders[region_id].append(builder_id)
-
-        sampled_regions = range(self.n_regions) if evaluate_all_regions else region_to_builders.keys()
 
         for source in self.sources:
             txs = self.tx_generator.generate(source, self.delta)
@@ -593,15 +597,33 @@ class LocationGamesSimulator:
                 tx_id = tx_emitted_counter
                 all_tx_values[tx_id] = tx.value
 
-                receiving_regions = []
                 actual_receivers = []
-                for region_id in sampled_regions:
-                    if self.propagation_model.receives(region_id, source.id, tx, self.delta):
-                        receiving_regions.append(region_id)
-                        if region_id in region_to_builders:
-                            actual_receivers.extend(region_to_builders[region_id])
+                receiving_regions = set()
 
-                tx_receiving_regions[tx_id] = receiving_regions
+                if evaluate_all_regions:
+                    candidate_receipts = np.zeros((self.n_builders, self.n_regions), dtype=bool)
+                    for builder_id in range(self.n_builders):
+                        for region_id in range(self.n_regions):
+                            candidate_receipts[builder_id, region_id] = self.propagation_model.receives(
+                                region_id,
+                                source.id,
+                                tx,
+                                self.delta,
+                            )
+
+                    builder_region_receipts[tx_id] = candidate_receipts
+
+                    for builder_id, region_id in builder_selected_regions.items():
+                        if candidate_receipts[builder_id, region_id]:
+                            actual_receivers.append(builder_id)
+                            receiving_regions.add(region_id)
+                else:
+                    for builder_id, region_id in builder_selected_regions.items():
+                        if self.propagation_model.receives(region_id, source.id, tx, self.delta):
+                            actual_receivers.append(builder_id)
+                            receiving_regions.add(region_id)
+
+                tx_receiving_regions[tx_id] = sorted(receiving_regions)
                 if actual_receivers:
                     actual_tx_receivers[tx_id] = actual_receivers
                     tx_received_counter += 1
@@ -621,6 +643,7 @@ class LocationGamesSimulator:
             rewards=rewards,
             tx_emitted_count=tx_emitted_counter,
             tx_received_count=tx_received_counter,
+            builder_region_receipts=builder_region_receipts,
         )
 
     def run_round(self):
@@ -686,26 +709,25 @@ class LocationGamesSimulator:
     ) -> float:
         total_utility = 0.0
         n_time_steps = q_by_source.shape[2]
-        same_region_others = int(counts_other[candidate_region])
-        outside_other_count = int(np.sum(counts_other) - same_region_others)
+        total_other_count = int(np.sum(counts_other))
 
         for source_idx in range(self.n_sources):
             q_source = q_by_source[source_idx]
             q_self = q_source[candidate_region]
 
-            distribution = np.zeros((n_time_steps, outside_other_count + 1))
+            distribution = np.zeros((n_time_steps, total_other_count + 1))
             distribution[:, 0] = 1.0
 
             for region_idx, count in enumerate(counts_other):
-                if region_idx == candidate_region or count <= 0:
+                if count <= 0:
                     continue
                 q_other = q_source[region_idx]
-                updated = distribution * (1.0 - q_other)[:, None]
-                updated[:, count:] += distribution[:, :-count] * q_other[:, None]
-                distribution = updated
+                for _ in range(int(count)):
+                    updated = distribution * (1.0 - q_other)[:, None]
+                    updated[:, 1:] += distribution[:, :-1] * q_other[:, None]
+                    distribution = updated
 
-            denominators = 1.0 + same_region_others + np.arange(outside_other_count + 1)
-            expected_share_factor = distribution @ (1.0 / denominators)
+            expected_share_factor = distribution @ (1.0 / (1.0 + np.arange(total_other_count + 1)))
             total_utility += source_value_weights[source_idx] * np.mean(q_self * expected_share_factor)
 
         return float(total_utility)
@@ -738,6 +760,30 @@ class LocationGamesSimulator:
                 )
                 for region_id in range(self.n_regions)
             ]
+        )
+
+    def _select_async_response_region(
+        self,
+        candidate_utilities: np.ndarray,
+        current_region: int,
+        improvement_threshold_pct: float,
+        response_rule: str,
+    ) -> Optional[int]:
+        current_utility = float(candidate_utilities[current_region])
+        improvement_threshold = improvement_threshold_pct * current_utility
+        improving_regions = np.flatnonzero(candidate_utilities > current_utility + improvement_threshold)
+        improving_regions = improving_regions[improving_regions != current_region]
+
+        if len(improving_regions) == 0:
+            return None
+
+        if response_rule == "best":
+            return int(improving_regions[np.argmax(candidate_utilities[improving_regions])])
+        if response_rule == "better":
+            return int(np.random.choice(improving_regions))
+        raise ValueError(
+            f"Unknown ABR response rule: {response_rule!r}. "
+            f"Expected one of {sorted(ABR_RESPONSE_RULES)}."
         )
 
     def compute_expected_builder_utilities(
@@ -880,7 +926,15 @@ class LocationGamesSimulator:
         improvement_threshold_pct: float = 0.001,
         n_time_steps: int = 200,
         max_updates: Optional[int] = None,
+        response_rule: str = "best",
     ):
+        response_rule = response_rule.lower()
+        if response_rule not in ABR_RESPONSE_RULES:
+            raise ValueError(
+                f"Unknown ABR response rule: {response_rule!r}. "
+                f"Expected one of {sorted(ABR_RESPONSE_RULES)}."
+            )
+
         if max_updates is None:
             max_updates = max(n_slots, self.n_builders)
 
@@ -898,13 +952,15 @@ class LocationGamesSimulator:
                 )
 
                 current_region = profile[builder_id]
-                current_utility = candidate_utilities[current_region]
-                improvement_threshold = improvement_threshold_pct * current_utility
-                best_region = int(np.argmax(candidate_utilities))
-                best_utility = candidate_utilities[best_region]
+                next_region = self._select_async_response_region(
+                    candidate_utilities=candidate_utilities,
+                    current_region=current_region,
+                    improvement_threshold_pct=improvement_threshold_pct,
+                    response_rule=response_rule,
+                )
 
-                if best_region != current_region and best_utility > current_utility + improvement_threshold:
-                    self.builders[builder_id].set_region(best_region)
+                if next_region is not None:
+                    self.builders[builder_id].set_region(next_region)
                     updates += 1
                     moved_in_pass = True
                     if updates >= max_updates:
@@ -922,9 +978,100 @@ class LocationGamesSimulator:
         )
 
         self.abr_adaptation_steps = updates
+        self.abr_update_mode = "async"
         self.abr_converged = converged and bool(ne_check["is_pure_ne"])
         self.abr_final_profile = list(final_profile)
         self.abr_max_profitable_deviation = float(ne_check["max_gain"])
+        self.abr_cycle_detected = False
+        self.abr_cycle_length = None
+
+        self._clear_history()
+        self.evaluate_fixed_profile(n_slots=n_slots, profile=final_profile)
+
+    def run_simultaneous_better_response(
+        self,
+        n_slots: int,
+        improvement_threshold_pct: float = 0.001,
+        n_time_steps: int = 200,
+        max_rounds: Optional[int] = None,
+        response_rule: str = "best",
+        detect_cycles: bool = True,
+    ):
+        """Run synchronous exact-response dynamics.
+
+        In each adaptation round, every builder computes its response against the
+        same pre-update profile. All selected moves are then committed together.
+        A fixed point is a pure Nash equilibrium; simultaneous updates may also
+        enter cycles, so repeated profiles are tracked separately from convergence.
+        """
+        response_rule = response_rule.lower()
+        if response_rule not in ABR_RESPONSE_RULES:
+            raise ValueError(
+                f"Unknown ABR response rule: {response_rule!r}. "
+                f"Expected one of {sorted(ABR_RESPONSE_RULES)}."
+            )
+
+        if max_rounds is None:
+            max_rounds = max(n_slots, self.n_builders)
+
+        rounds = 0
+        converged = False
+        cycle_detected = False
+        cycle_length = None
+        seen_profiles = {tuple(self._current_profile()): 0} if detect_cycles else {}
+
+        while rounds < max_rounds:
+            profile = self._current_profile()
+            next_profile = list(profile)
+            moved_in_round = False
+
+            for builder_id in range(self.n_builders):
+                candidate_utilities = self.compute_candidate_utilities_for_builder(
+                    builder_id=builder_id,
+                    profile=profile,
+                    n_time_steps=n_time_steps,
+                )
+                current_region = profile[builder_id]
+                next_region = self._select_async_response_region(
+                    candidate_utilities=candidate_utilities,
+                    current_region=current_region,
+                    improvement_threshold_pct=improvement_threshold_pct,
+                    response_rule=response_rule,
+                )
+                if next_region is not None:
+                    next_profile[builder_id] = next_region
+                    moved_in_round = True
+
+            if not moved_in_round:
+                converged = True
+                break
+
+            rounds += 1
+            self._set_profile(next_profile)
+
+            if detect_cycles:
+                profile_key = tuple(next_profile)
+                previous_round = seen_profiles.get(profile_key)
+                if previous_round is not None:
+                    cycle_detected = True
+                    cycle_length = rounds - previous_round
+                    break
+                seen_profiles[profile_key] = rounds
+
+        final_profile = self._current_profile()
+        ne_check = self.verify_pure_nash_equilibrium(
+            profile=final_profile,
+            n_time_steps=n_time_steps,
+            tolerance=1e-12,
+        )
+
+        self.abr_adaptation_steps = rounds
+        self.abr_update_mode = "simultaneous"
+        self.abr_converged = converged and bool(ne_check["is_pure_ne"])
+        self.abr_final_profile = list(final_profile)
+        self.abr_max_profitable_deviation = float(ne_check["max_gain"])
+        self.abr_cycle_detected = cycle_detected
+        self.abr_cycle_length = cycle_length
 
         self._clear_history()
         self.evaluate_fixed_profile(n_slots=n_slots, profile=final_profile)
@@ -934,28 +1081,22 @@ class LocationGamesSimulator:
         builder_selected_regions: Dict[int, int],
         outcome: RoundOutcome,
     ) -> np.ndarray:
+        if outcome.builder_region_receipts is None:
+            raise ValueError("MWU counterfactual payoffs require builder-level receipt samples.")
+
         payoffs = np.zeros((self.n_builders, self.n_regions))
-        region_counts = np.zeros(self.n_regions, dtype=int)
-        selected_region_array = np.zeros(self.n_builders, dtype=int)
+        del builder_selected_regions
 
-        for builder_id, region_id in builder_selected_regions.items():
-            region_counts[region_id] += 1
-            selected_region_array[builder_id] = region_id
-
-        for tx_id, receiving_regions in outcome.tx_receiving_regions.items():
-            if not receiving_regions:
-                continue
-
+        for tx_id, candidate_receipts in outcome.builder_region_receipts.items():
             value = outcome.all_tx_values[tx_id]
-            actual_receiving_builder_count = int(np.sum(region_counts[receiving_regions]))
-            receiving_region_mask = np.zeros(self.n_regions, dtype=bool)
-            receiving_region_mask[receiving_regions] = True
+            actual_receivers = outcome.actual_tx_receivers.get(tx_id, [])
+            actual_receiver_count = len(actual_receivers)
+            actual_receiver_mask = np.zeros(self.n_builders, dtype=bool)
+            actual_receiver_mask[actual_receivers] = True
 
             for builder_id in range(self.n_builders):
-                current_region = selected_region_array[builder_id]
-                other_receivers = actual_receiving_builder_count - int(receiving_region_mask[current_region])
-                share = value / (1 + other_receivers)
-                payoffs[builder_id, receiving_region_mask] += share
+                other_receivers = actual_receiver_count - int(actual_receiver_mask[builder_id])
+                payoffs[builder_id, candidate_receipts[builder_id]] += value / (1 + other_receivers)
 
         return payoffs
 
@@ -1071,7 +1212,77 @@ class LocationGamesSimulator:
         for i in range(n_slots):
             self.run_round_abr(i, n_t)
 
+    def compute_empirical_cce_gap(self, n_time_steps: int = 200) -> Dict[str, np.ndarray | float]:
+        n_slots = len(self.region_reward_pairs_history)
+        if n_slots == 0:
+            zero_builder_gaps = np.zeros(self.n_builders, dtype=float)
+            zero_regions = np.zeros(self.n_builders, dtype=int)
+            zero_gap_series = np.zeros(0, dtype=float)
+            self.cce_gap_over_time = zero_gap_series
+            self.cce_gap_by_builder = zero_builder_gaps
+            self.cce_best_deviation_regions = zero_regions
+            return {
+                "cce_gap": 0.0,
+                "cce_gap_by_builder": zero_builder_gaps,
+                "cce_best_deviation_regions": zero_regions,
+                "cce_gap_over_time": zero_gap_series,
+            }
+
+        env = self._get_expected_environment(n_time_steps)
+        q_by_source = env["q_by_source"]
+        source_value_weights = env["source_value_weights"]
+
+        cumulative_regrets = np.zeros((self.n_builders, self.n_regions), dtype=float)
+        gap_over_time = np.zeros(n_slots, dtype=float)
+        candidate_utility_cache: Dict[tuple, np.ndarray] = {}
+
+        for slot_idx, slot_profile in enumerate(self.region_reward_pairs_history):
+            profile = [region_id for region_id, _ in slot_profile]
+            counts = np.bincount(profile, minlength=self.n_regions).astype(int)
+
+            for builder_id, current_region in enumerate(profile):
+                counts_other = counts.copy()
+                counts_other[current_region] -= 1
+                cache_key = (current_region, tuple(counts_other.tolist()))
+                candidate_utilities = candidate_utility_cache.get(cache_key)
+                if candidate_utilities is None:
+                    candidate_utilities = np.array(
+                        [
+                            self._expected_utility_from_candidate_region(
+                                candidate_region=region_id,
+                                counts_other=counts_other,
+                                q_by_source=q_by_source,
+                                source_value_weights=source_value_weights,
+                            )
+                            for region_id in range(self.n_regions)
+                        ],
+                        dtype=float,
+                    )
+                    candidate_utility_cache[cache_key] = candidate_utilities
+
+                played_utility = candidate_utilities[current_region]
+                cumulative_regrets[builder_id] += candidate_utilities - played_utility
+
+            gap_over_time[slot_idx] = max(0.0, float(np.max(cumulative_regrets / (slot_idx + 1))))
+
+        average_regrets = cumulative_regrets / n_slots
+        cce_gap_by_builder = np.maximum(0.0, np.max(average_regrets, axis=1))
+        best_deviation_regions = np.argmax(average_regrets, axis=1).astype(int)
+        cce_gap = float(np.max(cce_gap_by_builder)) if len(cce_gap_by_builder) > 0 else 0.0
+
+        self.cce_gap_over_time = gap_over_time
+        self.cce_gap_by_builder = cce_gap_by_builder
+        self.cce_best_deviation_regions = best_deviation_regions
+
+        return {
+            "cce_gap": cce_gap,
+            "cce_gap_by_builder": cce_gap_by_builder,
+            "cce_best_deviation_regions": best_deviation_regions,
+            "cce_gap_over_time": gap_over_time,
+        }
+
     def get_statistics(self) -> Dict:
+        cce_stats = self.compute_empirical_cce_gap(n_time_steps=50)
         region_counts = np.array(self.region_counts_history)
         builder_distribution = np.array(self.builder_distribution_history)
 
@@ -1129,7 +1340,13 @@ class LocationGamesSimulator:
             "mean_txs_received_per_builder": mean_txs_per_builder,
             "mean_value_per_builder": mean_value_per_builder,
             "abr_adaptation_steps": self.abr_adaptation_steps,
+            "abr_update_mode": self.abr_update_mode,
             "abr_converged": self.abr_converged,
             "abr_final_profile": self.abr_final_profile,
             "abr_max_profitable_deviation": self.abr_max_profitable_deviation,
+            "abr_cycle_detected": self.abr_cycle_detected,
+            "abr_cycle_length": self.abr_cycle_length,
+            "cce_gap": cce_stats["cce_gap"],
+            "cce_gap_by_builder": cce_stats["cce_gap_by_builder"],
+            "cce_best_deviation_regions": cce_stats["cce_best_deviation_regions"],
         }

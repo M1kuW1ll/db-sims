@@ -24,6 +24,24 @@ from sim.simulator import (
 )
 
 
+class SingleTransactionGenerator:
+    def generate(self, source: Source, delta: float):
+        del source, delta
+        return [Transaction(0, 0.0, 1.0)]
+
+
+class SequencePropagationModel:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.index = 0
+
+    def receives(self, region_id: int, source_id: int, tx: Transaction, delta: float) -> bool:
+        del region_id, source_id, tx, delta
+        result = self.outcomes[self.index]
+        self.index += 1
+        return result
+
+
 class TestEqualSplitSharing(unittest.TestCase):
     def setUp(self):
         self.rule = EqualSplitSharingRule()
@@ -126,6 +144,81 @@ class TestWelfare(unittest.TestCase):
         self.assertEqual(sim.tx_received_history[0], 0.0)
 
 
+class TestIndependentBuilderReception(unittest.TestCase):
+    def test_colocated_builders_are_sampled_independently(self):
+        regions = [Region(0, "R0")]
+        sources = [Source(0, "S0", 0, 1.0, 0.0, 0.0)]
+        builders = [Builder(i, FixedPolicy(1)) for i in range(2)]
+
+        sim = LocationGamesSimulator(
+            regions=regions,
+            sources=sources,
+            builders=builders,
+            tx_generator=SingleTransactionGenerator(),
+            propagation_model=SequencePropagationModel([True, False]),
+            sharing_rule=EqualSplitSharingRule(),
+            delta=1.0,
+            seed=0,
+        )
+
+        outcome = sim._simulate_round_for_profile({0: 0, 1: 0}, evaluate_all_regions=False)
+
+        self.assertEqual(outcome.actual_tx_receivers, {0: [0]})
+        self.assertEqual(outcome.tx_receiving_regions, {0: [0]})
+
+
+class TestCCEDiagnostics(unittest.TestCase):
+    def test_empirical_cce_gap_is_zero_when_no_deviation_exists(self):
+        regions = [Region(0, "Only")]
+        sources = [Source(0, "S0", 0, 1.0, 0.0, 0.01)]
+        latency_mean = np.array([[0.01]])
+        latency_std = np.array([[0.001]])
+        builders = [Builder(0, FixedPolicy(1))]
+
+        sim = LocationGamesSimulator(
+            regions=regions,
+            sources=sources,
+            builders=builders,
+            tx_generator=StochasticTransactionGenerator(),
+            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
+            sharing_rule=EqualSplitSharingRule(),
+            delta=1.0,
+            seed=0,
+        )
+        sim.region_reward_pairs_history = [[(0, 0.0)], [(0, 0.0)]]
+
+        cce_stats = sim.compute_empirical_cce_gap(n_time_steps=50)
+
+        self.assertAlmostEqual(cce_stats["cce_gap"], 0.0)
+        np.testing.assert_allclose(cce_stats["cce_gap_by_builder"], [0.0])
+        np.testing.assert_array_equal(cce_stats["cce_best_deviation_regions"], [0])
+
+    def test_empirical_cce_gap_is_positive_when_fixed_deviation_would_help(self):
+        regions = [Region(0, "Fast"), Region(1, "Slow")]
+        sources = [Source(0, "S0", 0, 2.0, 0.0, 0.01)]
+        latency_mean = np.array([[0.01], [100.0]])
+        latency_std = np.array([[0.001], [1.0]])
+        builders = [Builder(0, FixedPolicy(2))]
+
+        sim = LocationGamesSimulator(
+            regions=regions,
+            sources=sources,
+            builders=builders,
+            tx_generator=StochasticTransactionGenerator(),
+            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
+            sharing_rule=EqualSplitSharingRule(),
+            delta=1.0,
+            seed=0,
+        )
+        sim.region_reward_pairs_history = [[(1, 0.0)], [(1, 0.0)], [(1, 0.0)]]
+
+        cce_stats = sim.compute_empirical_cce_gap(n_time_steps=50)
+
+        self.assertGreater(cce_stats["cce_gap"], 0.0)
+        np.testing.assert_array_equal(cce_stats["cce_best_deviation_regions"], [0])
+        self.assertEqual(len(cce_stats["cce_gap_over_time"]), 3)
+
+
 class TestLatencySlicing(unittest.TestCase):
     def test_slices_correct_columns_for_non_sequential_source_regions(self):
         full_matrix = np.array([
@@ -169,6 +262,24 @@ class TestAsynchronousBetterResponse(unittest.TestCase):
         )
         return sim
 
+    def _build_three_region_exact_sim(self):
+        regions = [Region(0, "R0"), Region(1, "R1"), Region(2, "R2")]
+        sources = [Source(0, "S0", 0, 1.0, 0.0, 0.01)]
+        latency_mean = np.array([[0.01], [0.01], [0.01]])
+        latency_std = np.array([[0.001], [0.001], [0.001]])
+
+        sim = LocationGamesSimulator(
+            regions=regions,
+            sources=sources,
+            builders=[Builder(0, FixedPolicy(3))],
+            tx_generator=StochasticTransactionGenerator(),
+            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
+            sharing_rule=EqualSplitSharingRule(),
+            delta=1.0,
+            seed=0,
+        )
+        return sim
+
     def test_exact_utilities_favor_fast_region(self):
         sim = self._build_simple_exact_sim()
         sim.builders[0].set_region(0)
@@ -200,6 +311,107 @@ class TestAsynchronousBetterResponse(unittest.TestCase):
         self.assertTrue(sim.abr_converged)
         self.assertLessEqual(sim.abr_max_profitable_deviation, 0.001)
 
+    def test_async_response_rule_best_uses_argmax_move(self):
+        sim = self._build_three_region_exact_sim()
+
+        def fake_candidate_utilities(builder_id: int, profile=None, n_time_steps: int = 200):
+            del builder_id, n_time_steps
+            current_region = profile[0]
+            if current_region == 0:
+                return np.array([1.0, 2.0, 3.0])
+            if current_region == 1:
+                return np.array([1.0, 2.0, 0.5])
+            return np.array([1.0, 2.0, 3.0])
+
+        sim.compute_candidate_utilities_for_builder = fake_candidate_utilities
+        sim.builders[0].set_region(0)
+
+        sim.run_async_better_response(
+            n_slots=0,
+            improvement_threshold_pct=0.0,
+            n_time_steps=10,
+            max_updates=5,
+            response_rule="best",
+        )
+
+        self.assertEqual(sim.builders[0].current_region, 2)
+        self.assertTrue(sim.abr_converged)
+
+    def test_async_response_rule_better_can_choose_non_best_improving_move(self):
+        sim = self._build_three_region_exact_sim()
+
+        def fake_candidate_utilities(builder_id: int, profile=None, n_time_steps: int = 200):
+            del builder_id, n_time_steps
+            current_region = profile[0]
+            if current_region == 0:
+                return np.array([1.0, 2.0, 3.0])
+            if current_region == 1:
+                return np.array([1.0, 2.0, 0.5])
+            return np.array([1.0, 2.0, 3.0])
+
+        sim.compute_candidate_utilities_for_builder = fake_candidate_utilities
+        sim.builders[0].set_region(0)
+        np.random.seed(0)
+
+        sim.run_async_better_response(
+            n_slots=0,
+            improvement_threshold_pct=0.0,
+            n_time_steps=10,
+            max_updates=5,
+            response_rule="better",
+        )
+
+        self.assertEqual(sim.builders[0].current_region, 1)
+        self.assertTrue(sim.abr_converged)
+
+    def test_simultaneous_better_response_converges_to_fixed_point(self):
+        sim = self._build_simple_exact_sim()
+        for builder in sim.builders:
+            builder.set_region(1)
+
+        sim.run_simultaneous_better_response(
+            n_slots=0,
+            improvement_threshold_pct=0.0,
+            n_time_steps=50,
+            max_rounds=10,
+            response_rule="best",
+        )
+
+        self.assertEqual([builder.current_region for builder in sim.builders], [0, 0])
+        self.assertEqual(sim.abr_update_mode, "simultaneous")
+        self.assertEqual(sim.abr_adaptation_steps, 1)
+        self.assertTrue(sim.abr_converged)
+        self.assertFalse(sim.abr_cycle_detected)
+
+    def test_simultaneous_better_response_detects_cycle(self):
+        sim = self._build_simple_exact_sim()
+
+        def fake_candidate_utilities(builder_id: int, profile=None, n_time_steps: int = 200):
+            del n_time_steps
+            current_region = profile[builder_id]
+            if current_region == 0:
+                return np.array([1.0, 2.0])
+            return np.array([2.0, 1.0])
+
+        sim.compute_candidate_utilities_for_builder = fake_candidate_utilities
+        for builder in sim.builders:
+            builder.set_region(0)
+
+        sim.run_simultaneous_better_response(
+            n_slots=0,
+            improvement_threshold_pct=0.0,
+            n_time_steps=10,
+            max_rounds=10,
+            response_rule="best",
+        )
+
+        self.assertEqual([builder.current_region for builder in sim.builders], [0, 0])
+        self.assertEqual(sim.abr_update_mode, "simultaneous")
+        self.assertEqual(sim.abr_adaptation_steps, 2)
+        self.assertFalse(sim.abr_converged)
+        self.assertTrue(sim.abr_cycle_detected)
+        self.assertEqual(sim.abr_cycle_length, 2)
+
 
 class TestMWU(unittest.TestCase):
     def test_counterfactual_payoffs_account_for_other_receivers(self):
@@ -227,11 +439,21 @@ class TestMWU(unittest.TestCase):
             rewards={0: 2.0, 1: 1.0},
             tx_emitted_count=2,
             tx_received_count=2,
+            builder_region_receipts={
+                0: np.array([
+                    [True, False],
+                    [True, False],
+                ], dtype=bool),
+                1: np.array([
+                    [True, True],
+                    [False, True],
+                ], dtype=bool),
+            },
         )
         payoffs = sim._compute_mwu_counterfactual_payoffs({0: 0, 1: 1}, outcome)
 
         np.testing.assert_allclose(payoffs[0], [2.0, 1.0])
-        np.testing.assert_allclose(payoffs[1], [1.5, 1.0])
+        np.testing.assert_allclose(payoffs[1], [0.5, 1.0])
 
     def test_mwu_runs_and_records_history(self):
         regions = [Region(0, "Fast"), Region(1, "Slow")]

@@ -494,7 +494,8 @@ def farthest_first_regions(K: int, n_regions: int,
 def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
                  regions: list, delta: float, init_regions: list, seed: int,
                  n_t: int = 100, max_rounds: int = 4000, n_t_final: int = 200,
-                 n_high_sources: int = 5) -> dict:
+                 n_high_sources: int = 5, update_mode: str = "async",
+                 response_rule: str = "best") -> dict:
     """Run ABR to convergence from an explicit initial placement.
 
     sliced_prop must be source-sliced (shape (n_regions, n_sources)) so that
@@ -517,10 +518,35 @@ def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
     for i, b in enumerate(sim.builders):
         b.set_region(init_regions[i])
 
+    update_mode = update_mode.lower()
     np.random.seed(seed)
-    sim.run_abr_until_convergence(n_t=n_t, max_rounds=max_rounds)
+    if update_mode == "async":
+        rounds_used = sim.run_abr_until_convergence(n_t=n_t, max_rounds=max_rounds)
+        sim.abr_adaptation_steps = rounds_used
+        sim.abr_update_mode = "async"
+        sim.abr_cycle_detected = False
+        sim.abr_cycle_length = None
+    elif update_mode == "simultaneous":
+        sim.run_simultaneous_better_response(
+            n_slots=0,
+            improvement_threshold_pct=0.0,
+            n_time_steps=n_t,
+            max_rounds=max_rounds,
+            response_rule=response_rule,
+        )
+        rounds_used = sim.abr_adaptation_steps
+    else:
+        raise ValueError(
+            f"Unknown ABR update mode: {update_mode!r}. "
+            "Expected 'async' or 'simultaneous'."
+        )
 
     final_profile = [b.current_region for b in sim.builders]
+    ne_check = sim.verify_pure_nash_equilibrium(
+        profile=final_profile,
+        n_time_steps=n_t_final,
+        tolerance=1e-12,
+    )
     welfare = _compute_welfare_analytical(final_profile, sources, sliced_prop, delta, n_t_final)
     utilities = compute_all_builder_utilities(
         final_profile, sources, sliced_prop, delta, n_t_final
@@ -531,6 +557,12 @@ def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
 
     return {
         "final_profile": final_profile,
+        "update_mode": update_mode,
+        "converged": bool(ne_check["is_pure_ne"]),
+        "rounds_used": int(rounds_used),
+        "cycle_detected": bool(sim.abr_cycle_detected),
+        "cycle_length": sim.abr_cycle_length,
+        "max_profitable_deviation": float(ne_check["max_gain"]),
         "welfare": welfare,
         "geo_hhi": geo_hhi(final_profile, n_regions),
         "mean_pairwise_km": mean_pairwise_distance_km(final_profile, list(regions)),
