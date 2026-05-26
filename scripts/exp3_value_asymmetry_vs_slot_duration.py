@@ -20,6 +20,9 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors
+from matplotlib.patches import Patch
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from scripts.exp_helpers import (
     REGIONS_DEFAULT,
@@ -30,7 +33,12 @@ from scripts.exp_helpers import (
     make_sliced_prop,
     compute_opt_sliced,
     run_abr_full,
+    geo_hhi,
+    mean_pairwise_distance_km,
+    cluster_coverage_fraction,
 )
+from sim.metrics import hhi as _hhi
+from sim.simulator import compute_all_builder_utilities
 
 REGIONS_EXP3 = list(REGIONS_DEFAULT) + ["europe-west2", "asia-northeast2", "asia-south2", "us-west2"]
 
@@ -131,10 +139,8 @@ def sample_source_layout(rng):
     peri = list(rng.choice(PERIPHERAL_POOL, size=N_PERI, replace=False))
     return high, peri
 
-def _abr_worker(args):
-    (ratio_idx, value_ratio, alpha,
-     delta_idx, delta, instance_idx, seed_within_instance) = args
 
+def _source_model(alpha, instance_idx):
     inst_rng = np.random.default_rng(MASTER_SEED + instance_idx)
     high_regions, peri_regions = sample_source_layout(inst_rng)
 
@@ -145,6 +151,14 @@ def _abr_worker(args):
         distant_regions=peri_regions,
     )
     sliced_prop = make_sliced_prop(sources, prop)
+    return regions, sources, sliced_prop
+
+
+def _abr_worker(args):
+    (ratio_idx, value_ratio, alpha,
+     delta_idx, delta, instance_idx, seed_within_instance) = args
+
+    regions, sources, sliced_prop = _source_model(alpha, instance_idx)
     n_regions = len(regions)
 
     # ABR initialisation: deterministic per (instance, seed), not ratio/delta
@@ -174,25 +188,35 @@ def _abr_worker(args):
     return result
 
 
+def _planner_metrics(profile, sources, sliced_prop, regions, delta):
+    profile = [int(r) for r in profile]
+    high_ids = list(range(N_HIGH))
+    peri_ids = list(range(N_HIGH, N_HIGH + N_PERI))
+    utilities = compute_all_builder_utilities(
+        profile, sources, sliced_prop, delta, N_T_FINAL,
+    )
+    return {
+        "geo_hhi_opt": geo_hhi(profile, len(regions)),
+        "mean_pairwise_km_opt": mean_pairwise_distance_km(profile, list(regions)),
+        "utility_hhi_opt": float(_hhi(utilities)),
+        "cov_high_opt": cluster_coverage_fraction(
+            profile, sources, sliced_prop, delta, high_ids, n_t=N_T_FINAL),
+        "cov_peripheral_opt": cluster_coverage_fraction(
+            profile, sources, sliced_prop, delta, peri_ids, n_t=N_T_FINAL),
+    }
+
+
 def _planner_worker(args):
     (ratio_idx, value_ratio, alpha,
      delta_idx, delta, instance_idx, opt_method) = args
 
-    inst_rng = np.random.default_rng(MASTER_SEED + instance_idx)
-    high_regions, peri_regions = sample_source_layout(inst_rng)
-
-    regions, prop, region_index_map = load_propagation_model(REGIONS_EXP3)
-    sources = build_two_cluster_sources(
-        alpha, TOTAL_VALUE, region_index_map,
-        high_value_regions=high_regions,
-        distant_regions=peri_regions,
-    )
-    sliced_prop = make_sliced_prop(sources, prop)
+    regions, sources, sliced_prop = _source_model(alpha, instance_idx)
     n_regions = len(regions)
     w_opt, opt_profile = compute_opt_sliced(
         K, sources, sliced_prop, n_regions, delta,
         n_t=N_T_FINAL, method=opt_method,
     )
+    metrics = _planner_metrics(opt_profile, sources, sliced_prop, regions, delta)
     return {
         "ratio_idx": ratio_idx,
         "value_ratio": float(value_ratio),
@@ -202,6 +226,7 @@ def _planner_worker(args):
         "instance_idx": instance_idx,
         "w_opt": w_opt,
         "opt_profile": opt_profile,
+        **metrics,
     }
 
 
@@ -242,8 +267,76 @@ def _build_grids(abr_runs, planner_runs):
     return grids
 
 
+_PLANNER_METRIC_KEYS = (
+    "geo_hhi_opt",
+    "mean_pairwise_km_opt",
+    "utility_hhi_opt",
+    "cov_high_opt",
+    "cov_peripheral_opt",
+)
+
+
+def _ensure_planner_metrics(planner_runs):
+    """Add planner concentration/coverage metrics to old cached planner runs."""
+    out = []
+    missing = 0
+    for run in planner_runs:
+        if all(key in run for key in _PLANNER_METRIC_KEYS):
+            out.append(run)
+            continue
+
+        missing += 1
+        enriched = dict(run)
+        alpha = float(enriched.get(
+            "alpha", ALPHA_GRID[int(enriched["ratio_idx"])]
+        ))
+        regions, sources, sliced_prop = _source_model(
+            alpha, int(enriched["instance_idx"])
+        )
+        enriched.update(_planner_metrics(
+            enriched["opt_profile"], sources, sliced_prop,
+            regions, float(enriched["delta"]),
+        ))
+        out.append(enriched)
+
+    if missing:
+        print(f"Computed planner metrics for {missing} cached planner runs.")
+    return out
+
+
+def _build_planner_grids(planner_runs):
+    """Return planner-optimal grids in the same shape as the PNE grids."""
+    planner_runs = _ensure_planner_metrics(planner_runs)
+    planner_by_cell = {}
+    for p in planner_runs:
+        key = (p["ratio_idx"], p["delta_idx"])
+        planner_by_cell.setdefault(key, []).append(p)
+
+    metrics = ["welfare_ratio", "geo_hhi", "utility_hhi",
+               "mean_pairwise_km", "cov_high", "cov_peripheral"]
+    grids = {m: np.full((N_RATIO, N_DELTA), np.nan) for m in metrics}
+
+    key_map = {
+        "geo_hhi": "geo_hhi_opt",
+        "utility_hhi": "utility_hhi_opt",
+        "mean_pairwise_km": "mean_pairwise_km_opt",
+        "cov_high": "cov_high_opt",
+        "cov_peripheral": "cov_peripheral_opt",
+    }
+    for (ri, di), runs in planner_by_cell.items():
+        if any(p.get("w_opt", 0.0) > 1e-12 for p in runs):
+            grids["welfare_ratio"][ri, di] = 1.0
+        for out_key, planner_key in key_map.items():
+            vals = [p[planner_key] for p in runs if planner_key in p]
+            if vals:
+                grids[out_key][ri, di] = float(np.median(vals))
+
+    return grids
+
+
 def _plot_heatmap(ax, grid, title, cbar_label, vmin=None, vmax=None,
-                  cmap="viridis"):
+                  cmap="viridis", compact_x=False, show_ylabel=True,
+                  show_xlabel=True):
     """Plot one (N_RATIO, N_DELTA) heatmap. ratio on y, delta on x."""
     im = ax.imshow(
         grid,
@@ -256,75 +349,549 @@ def _plot_heatmap(ax, grid, title, cbar_label, vmin=None, vmax=None,
 
     n_ratio, n_delta = grid.shape
     ax.set_yticks(np.arange(n_ratio))
-    ax.set_yticklabels(VALUE_RATIO_LABELS, fontsize=7)
-    ax.set_xticks(np.arange(n_delta))
-    ax.set_xticklabels([f"{int(d*1000)}" for d in DELTA_GRID],
-                       fontsize=7, rotation=45)
+    ax.set_yticklabels(VALUE_RATIO_LABELS)
+    ax.tick_params(axis="both", labelsize=10)
+
+    if compact_x:
+        tick_idx = [0, 2, 4, 6, n_delta - 1]
+    else:
+        tick_idx = list(range(n_delta))
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels([f"{int(DELTA_GRID[i] * 1000)}" for i in tick_idx],
+                       rotation=45, ha="right")
 
     delta_50_idx = int(np.argmin(np.abs(DELTA_GRID - 0.050)))
     if abs(DELTA_GRID[delta_50_idx] - 0.050) / 0.050 < 0.30:
         ax.axvline(delta_50_idx, color="white", lw=1.0, ls="--", alpha=0.7)
 
-    ax.set_xlabel(r"Slot duration $\Delta$ (ms)")
-    ax.set_ylabel("Expected per-source value ratio (high / low)")
-    ax.set_title(title, fontsize=10)
+    if show_xlabel:
+        ax.set_xlabel(r"Slot duration $\Delta$ (ms)", fontsize=11)
+    if show_ylabel:
+        ax.set_ylabel(r"High-to-low value ratio $v$", fontsize=11)
+    ax.set_title(title, fontsize=12)
 
     for side in ("top", "right", "bottom", "left"):
         ax.spines[side].set_visible(True)
 
-    if n_ratio * n_delta <= 200:
-        for ri in range(n_ratio):
-            for di in range(n_delta):
-                v = grid[ri, di]
-                if np.isnan(v):
-                    continue
-                norm_v = (v - (vmin if vmin is not None else np.nanmin(grid))) / \
-                         max(1e-9, ((vmax if vmax is not None else np.nanmax(grid)) -
-                                    (vmin if vmin is not None else np.nanmin(grid))))
-                color = "white" if norm_v < 0.5 else "black"
-                ax.text(di, ri, f"{v:.2f}",
-                        ha="center", va="center", fontsize=6, color=color)
-
-    cbar = plt.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
-    cbar.set_label(cbar_label, fontsize=8)
-    cbar.ax.tick_params(labelsize=7)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
+    cbar.set_label(cbar_label, fontsize=10)
+    cbar.ax.tick_params(labelsize=10)
 
 
-def plot_heatmaps(grids):
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-    fig.subplots_adjust(hspace=0.45, wspace=0.45)
-
+def plot_heatmaps(grids, output_stem=None, paper_stem=None, title_prefix=""):
     egal_floor = 1 / K
     ne_ceiling = 9 / (8 * K)
+    utility_vmax = max(ne_ceiling, float(np.nanmax(grids["utility_hhi"])))
+    prefix = f"{title_prefix} " if title_prefix else ""
 
-    panels = [
-        (axes[0, 0], grids["welfare_ratio"], "(A) Welfare ratio $W_{\\rm ABR}/W^*$",
-         "ratio", 0.5, 1.0, "viridis"),
-        (axes[0, 1], grids["geo_hhi"], "(B) Geographic HHI",
-         "HHI", egal_floor, 1.0, "magma"),
-        (axes[0, 2], grids["utility_hhi"], "(C) Utility HHI",
-         "HHI", egal_floor, ne_ceiling, "magma"),
-        (axes[1, 0], grids["mean_pairwise_km"], "(D) Mean pairwise distance",
-         "km", None, None, "cividis"),
-        (axes[1, 1], grids["cov_high"], "(E) High-value cluster coverage",
-         "fraction", 0.0, 1.0, "viridis"),
-        (axes[1, 2], grids["cov_peripheral"], "(F) Peripheral cluster coverage",
-         "fraction", 0.0, 1.0, "viridis"),
-    ]
-    for ax, grid, title, cbar_label, vmin, vmax, cmap in panels:
-        _plot_heatmap(ax, grid, title, cbar_label, vmin=vmin, vmax=vmax, cmap=cmap)
-
-    fig.suptitle(
-        rf"Experiment 3 ($K={K}$): (value ratio, $\Delta$) heatmaps "
-        rf"({N_INSTANCES} source instances $\times$ "
-        rf"{N_SEEDS_PER_INSTANCE} inits per cell; dashed line: $\Delta=50$ ms; "
-        rf"opt method: {OPT_METHOD})",
-        fontsize=12, y=0.995,
+    fig = plt.figure(figsize=(12, 6.1))
+    gs = fig.add_gridspec(
+        nrows=2, ncols=18,
+        hspace=0.55, wspace=0.70,
     )
-    out = FIGURES_DIR / f"exp3_k{K}_ratio_delta_heatmaps.pdf"
+
+    ax_welfare = fig.add_subplot(gs[0, 0:8])
+    ax_high = fig.add_subplot(gs[0, 10:13])
+    ax_peri = fig.add_subplot(gs[0, 15:18])
+    ax_geo = fig.add_subplot(gs[1, 0:8])
+    ax_util = fig.add_subplot(gs[1, 10:18])
+
+    _plot_heatmap(
+        ax_welfare, grids["welfare_ratio"], f"{prefix}Welfare Ratio", "ratio",
+        vmin=0.5, vmax=1.0, cmap="viridis",
+    )
+    _plot_heatmap(
+        ax_high, grids["cov_high"], f"{prefix}High-value Coverage", "fraction",
+        vmin=0.0, vmax=1.0, cmap="viridis", compact_x=True,
+        show_ylabel=False,
+    )
+    _plot_heatmap(
+        ax_peri, grids["cov_peripheral"], f"{prefix}Peripheral Coverage", "fraction",
+        vmin=0.0, vmax=1.0, cmap="viridis", compact_x=True,
+        show_ylabel=False,
+    )
+    _plot_heatmap(
+        ax_geo, grids["geo_hhi"], f"{prefix}Geographic HHI", "HHI",
+        vmin=egal_floor, vmax=1.0, cmap="magma",
+    )
+    _plot_heatmap(
+        ax_util, grids["utility_hhi"], f"{prefix}Utility HHI", "HHI",
+        vmin=egal_floor, vmax=utility_vmax, cmap="magma",
+    )
+
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.13, top=0.94)
+    if output_stem is None:
+        output_stem = f"exp3_k{K}_ratio_delta_heatmaps"
+    if paper_stem is None:
+        paper_stem = "paper_exp3_2x2"
+    out = FIGURES_DIR / f"{output_stem}.pdf"
     fig.savefig(out, bbox_inches="tight")
     fig.savefig(str(out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    paper_out = FIGURES_DIR / f"{paper_stem}.pdf"
+    fig.savefig(paper_out, bbox_inches="tight")
+    fig.savefig(str(paper_out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
     print(f"Saved {out}")
+    print(f"Saved {paper_out}")
+
+
+def _surface_mesh():
+    x = np.log10(np.asarray(DELTA_GRID_MS, dtype=float))
+    y = np.log10(np.asarray(VALUE_RATIO_GRID, dtype=float))
+    return np.meshgrid(x, y)
+
+
+def _format_surface_axis(ax, title, _zlabel, zlim, elev=24, azim=-58,
+                         invert_y_axis=False):
+    delta_ticks = [10, 50, 250, 1000, 6000, 12000]
+    ratio_ticks = [1, 2, 5, 10, 20]
+
+    ax.set_title(title, fontsize=17, pad=0)
+    ax.set_xlabel("Slot duration (ms)", fontsize=13, labelpad=6)
+    ax.set_ylabel("Value ratio", fontsize=13, labelpad=6)
+    ax.set_xticks(np.log10(delta_ticks))
+    ax.set_xticklabels([str(t) for t in delta_ticks], rotation=45, ha="right")
+    ax.set_yticks(np.log10(ratio_ticks))
+    ax.set_yticklabels([_format_ratio_label(t) for t in ratio_ticks])
+    if invert_y_axis:
+        ax.set_ylim(np.log10(max(ratio_ticks)), np.log10(min(ratio_ticks)))
+    ax.set_zlim(*zlim)
+    ax.tick_params(axis="x", labelsize=12, pad=-8)
+    ax.tick_params(axis="y", labelsize=12, pad=1)
+    ax.tick_params(axis="z", labelsize=12, pad=1)
+    ax.set_box_aspect((1.15, 1.0, 0.72), zoom=1.08)
+    ax.view_init(elev=elev, azim=azim)
+    ax.xaxis.pane.set_facecolor((1, 1, 1, 0.0))
+    ax.yaxis.pane.set_facecolor((1, 1, 1, 0.0))
+    ax.zaxis.pane.set_facecolor((1, 1, 1, 0.0))
+
+
+def _surface_facecolors(z, zlim, cmap_name, alpha, cmap_floor=0.0):
+    norm = colors.Normalize(vmin=zlim[0], vmax=zlim[1])
+    scaled = cmap_floor + (1.0 - cmap_floor) * norm(z)
+    facecolors = plt.get_cmap(cmap_name)(scaled)
+    facecolors[..., -1] = alpha
+    return facecolors
+
+
+def _pne_blue_cmap():
+    return colors.LinearSegmentedColormap.from_list(
+        "pne_overlay_blues", ["#7fb8e8", "#2f7ed8", "#004caa", "#00164d"]
+    )
+
+
+def _finite_zlim(z, fallback_zlim):
+    finite = z[np.isfinite(z)]
+    if finite.size == 0:
+        return fallback_zlim
+    zmin = float(np.min(finite))
+    zmax = float(np.max(finite))
+    if abs(zmax - zmin) < 1e-12:
+        pad = max(0.5, 0.01 * abs(zmin))
+        return zmin - pad, zmax + pad
+    return zmin, zmax
+
+
+def _pne_overlay_facecolors(z, alpha, norm_zlim):
+    norm = colors.Normalize(vmin=norm_zlim[0], vmax=norm_zlim[1])
+    facecolors = _pne_blue_cmap()(norm(z))
+    facecolors[..., -1] = alpha
+    return facecolors
+
+
+def _plot_value_wireframe(ax, x, y, z, zlim, cmap_name, offset=0.0,
+                          linewidth=1.75, alpha=1.0, norm_zlim=None):
+    if norm_zlim is None:
+        norm_zlim = zlim
+    norm_zlim = _finite_zlim(z, norm_zlim)
+    norm = colors.Normalize(vmin=norm_zlim[0], vmax=norm_zlim[1])
+    if cmap_name == "PNEBlues":
+        cmap = _pne_blue_cmap()
+    else:
+        cmap = plt.get_cmap(cmap_name)
+    segments = []
+    segment_colors = []
+
+    def add_segment(p0, p1):
+        avg_z = 0.5 * (p0[2] + p1[2]) - offset
+        rgba = list(cmap(norm(avg_z)))
+        rgba[-1] = alpha
+        segments.append([p0, p1])
+        segment_colors.append(rgba)
+
+    z_lifted = z + offset
+    for row in range(x.shape[0]):
+        for col in range(x.shape[1] - 1):
+            add_segment(
+                (x[row, col], y[row, col], z_lifted[row, col]),
+                (x[row, col + 1], y[row, col + 1], z_lifted[row, col + 1]),
+            )
+    for row in range(x.shape[0] - 1):
+        for col in range(x.shape[1]):
+            add_segment(
+                (x[row, col], y[row, col], z_lifted[row, col]),
+                (x[row + 1, col], y[row + 1, col], z_lifted[row + 1, col]),
+            )
+
+    line_collection = Line3DCollection(
+        segments,
+        colors=segment_colors,
+        linewidths=linewidth,
+    )
+    ax.add_collection3d(line_collection)
+
+
+def _gap_facecolors(z, zlim, alpha, deadband=0.0):
+    max_abs = max(abs(zlim[0]), abs(zlim[1]), 1e-12)
+    abs_z = np.abs(z)
+    denom = max(max_abs - deadband, 1e-12)
+    magnitude = np.clip((abs_z - deadband) / denom, 0.0, 1.0)
+    facecolors = np.empty(z.shape + (4,), dtype=float)
+
+    neg = z < -deadband
+    pos = z > deadband
+    neutral = ~(neg | pos)
+
+    facecolors[neg] = _pne_blue_cmap()(magnitude[neg])
+    facecolors[pos] = plt.get_cmap("Reds")(0.30 + 0.70 * magnitude[pos])
+    facecolors[neutral] = (0.96, 0.96, 0.94, alpha * 0.35)
+    facecolors[..., -1] = np.where(neutral, alpha * 0.35, alpha)
+    return facecolors
+
+
+def _plot_single_surface(ax, x, y, z, cmap_name, title, zlabel, zlim,
+                         elev=24, azim=-58, invert_y_axis=False):
+    ax.plot_surface(
+        x, y, z,
+        facecolors=_surface_facecolors(z, zlim, cmap_name, 0.86),
+        shade=False,
+        edgecolor=(0, 0, 0, 0.18),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    _format_surface_axis(
+        ax, title, zlabel, zlim, elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+
+def _plot_comparison_surface(ax, x, y, pne_z, planner_z, title, zlabel, zlim,
+                             elev=24, azim=-58, invert_y_axis=False,
+                             mesh_overlay=False, filled_overlay=False,
+                             filled_overlay_alpha=0.52):
+    wire_offset = 0.0
+    planner_alpha = 0.56 if filled_overlay else 0.78
+    ax.plot_surface(
+        x, y, planner_z,
+        facecolors=_surface_facecolors(
+            planner_z, zlim, "Reds", planner_alpha, cmap_floor=0.30
+        ),
+        shade=False,
+        edgecolor=(0.55, 0.05, 0.05, 0.28),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    fill_offset = 0.006 * (zlim[1] - zlim[0]) if filled_overlay else 0.0
+    pne_norm_zlim = _finite_zlim(pne_z, zlim)
+    pne_alpha = (
+        filled_overlay_alpha if filled_overlay
+        else (0.12 if mesh_overlay else 0.88)
+    )
+    if filled_overlay:
+        pne_facecolors = _pne_overlay_facecolors(
+            pne_z, alpha=pne_alpha, norm_zlim=pne_norm_zlim
+        )
+    else:
+        pne_facecolors = _surface_facecolors(
+            pne_z, zlim, "Blues", pne_alpha, cmap_floor=0.38
+        )
+    ax.plot_surface(
+        x, y, pne_z + fill_offset,
+        facecolors=pne_facecolors,
+        shade=False,
+        edgecolor=(
+            (0.02, 0.11, 0.28, 0.18)
+            if filled_overlay else
+            (0.05, 0.18, 0.35, 0.0 if mesh_overlay else 0.28)
+        ),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    if mesh_overlay:
+        wire_offset = 0.012 * (zlim[1] - zlim[0])
+        _plot_value_wireframe(
+            ax, x, y, pne_z, zlim, "PNEBlues",
+            offset=wire_offset, norm_zlim=pne_norm_zlim,
+        )
+    _format_surface_axis(
+        ax, title, zlabel, (zlim[0], zlim[1] + max(wire_offset, fill_offset)),
+        elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+
+def _plot_gap_surface(ax, x, y, gap_z, title, zlim,
+                      elev=24, azim=-58, invert_y_axis=False,
+                      deadband=0.0):
+    ax.plot_surface(
+        x, y, np.zeros_like(gap_z),
+        color=(0.5, 0.5, 0.5, 0.16),
+        edgecolor=(0.35, 0.35, 0.35, 0.18),
+        linewidth=0.2,
+        antialiased=True,
+    )
+    ax.plot_surface(
+        x, y, gap_z,
+        facecolors=_gap_facecolors(gap_z, zlim, 0.88, deadband=deadband),
+        shade=False,
+        edgecolor=(0, 0, 0, 0.18),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    _format_surface_axis(
+        ax, title, "gap", zlim,
+        elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+
+def _plot_planner_on_top_surface(ax, x, y, pne_z, planner_z, title, zlabel, zlim,
+                                 elev=24, azim=-58, invert_y_axis=False):
+    pne_norm_zlim = _finite_zlim(pne_z, zlim)
+    ax.plot_surface(
+        x, y, pne_z,
+        facecolors=_pne_overlay_facecolors(
+            pne_z, alpha=0.70, norm_zlim=pne_norm_zlim
+        ),
+        shade=False,
+        edgecolor=(0.02, 0.11, 0.28, 0.18),
+        linewidth=0.25,
+        antialiased=True,
+    )
+
+    lift = 0.006 * (zlim[1] - zlim[0])
+    ax.plot_surface(
+        x, y, planner_z + lift,
+        facecolors=_surface_facecolors(
+            planner_z, zlim, "Reds", 0.86, cmap_floor=0.30
+        ),
+        shade=False,
+        edgecolor=(0.55, 0.05, 0.05, 0.22),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    _format_surface_axis(
+        ax, title, zlabel, (zlim[0], zlim[1] + lift),
+        elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+
+def plot_3d_surfaces(pne_grids, planner_grids, output_stem=None,
+                     paper_stem=None, elev=24, azim=-58,
+                     invert_y_axis=False, coverage_mesh_overlay=False,
+                     hhi_mesh_overlay=False, coverage_filled_overlay=False,
+                     hhi_filled_overlay=False, coverage_filled_alpha=0.52,
+                     hhi_filled_alpha=0.52):
+    x, y = _surface_mesh()
+    fig = plt.figure(figsize=(15.4, 8.25))
+    gs = fig.add_gridspec(2, 6, hspace=0.15, wspace=-0.03)
+
+    axes = [
+        fig.add_subplot(gs[0, 0:2], projection="3d"),
+        fig.add_subplot(gs[0, 2:4], projection="3d"),
+        fig.add_subplot(gs[0, 4:6], projection="3d"),
+        fig.add_subplot(gs[1, 1:3], projection="3d"),
+        fig.add_subplot(gs[1, 3:5], projection="3d"),
+    ]
+
+    _plot_single_surface(
+        axes[0], x, y, pne_grids["welfare_ratio"], "Greens",
+        "PNE Welfare Ratio", "ratio", (0.5, 1.0), elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+    _plot_comparison_surface(
+        axes[1], x, y, pne_grids["cov_high"], planner_grids["cov_high"],
+        "High-value Coverage", "fraction", (0.0, 1.0),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        mesh_overlay=coverage_mesh_overlay,
+        filled_overlay=coverage_filled_overlay,
+        filled_overlay_alpha=coverage_filled_alpha,
+    )
+    _plot_comparison_surface(
+        axes[2], x, y, pne_grids["cov_peripheral"], planner_grids["cov_peripheral"],
+        "Peripheral Coverage", "fraction", (0.0, 1.0),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        mesh_overlay=coverage_mesh_overlay,
+        filled_overlay=coverage_filled_overlay,
+        filled_overlay_alpha=coverage_filled_alpha,
+    )
+
+    geo_max = max(
+        float(np.nanmax(pne_grids["geo_hhi"])),
+        float(np.nanmax(planner_grids["geo_hhi"])),
+        1 / K,
+    )
+    _plot_comparison_surface(
+        axes[3], x, y, pne_grids["geo_hhi"], planner_grids["geo_hhi"],
+        "Geographic HHI", "HHI", (1 / K, min(1.0, geo_max + 0.05)),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        mesh_overlay=hhi_mesh_overlay,
+        filled_overlay=hhi_filled_overlay,
+        filled_overlay_alpha=hhi_filled_alpha,
+    )
+
+    util_max = max(
+        float(np.nanmax(pne_grids["utility_hhi"])),
+        float(np.nanmax(planner_grids["utility_hhi"])),
+        9 / (8 * K),
+    )
+    _plot_comparison_surface(
+        axes[4], x, y, pne_grids["utility_hhi"], planner_grids["utility_hhi"],
+        "Utility HHI", "HHI", (1 / K, util_max + 0.01),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        mesh_overlay=hhi_mesh_overlay,
+        filled_overlay=hhi_filled_overlay,
+        filled_overlay_alpha=hhi_filled_alpha,
+    )
+
+    legend_handles = [
+        Patch(facecolor="#2ca02c", edgecolor="none", alpha=0.86,
+              label="PNE welfare ratio (darker = higher)"),
+        Patch(facecolor="#1f77b4", edgecolor="none", alpha=0.68,
+              label="PNE (darker = higher)"),
+        Patch(facecolor="#d62728", edgecolor="none", alpha=0.58,
+              label="Planner (darker = higher)"),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=3,
+        frameon=False,
+        fontsize=16,
+        bbox_to_anchor=(0.5, 0.02),
+    )
+    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.10, top=0.94)
+
+    if output_stem is None:
+        output_stem = f"exp3_k{K}_3d_surfaces"
+    if paper_stem is None:
+        paper_stem = "paper_exp3_3d_surfaces"
+    out = FIGURES_DIR / f"{output_stem}.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(str(out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    paper_out = FIGURES_DIR / f"{paper_stem}.pdf"
+    fig.savefig(paper_out, bbox_inches="tight")
+    fig.savefig(str(paper_out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    print(f"Saved {out}")
+    print(f"Saved {paper_out}")
+
+
+def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
+                                  paper_stem=None, elev=24, azim=-58,
+                                  invert_y_axis=False,
+                                  hhi_filled_overlay=False,
+                                  hhi_filled_alpha=0.52,
+                                  gap_deadband=0.05):
+    x, y = _surface_mesh()
+    fig = plt.figure(figsize=(15.4, 8.25))
+    gs = fig.add_gridspec(2, 6, hspace=0.15, wspace=-0.03)
+
+    axes = [
+        fig.add_subplot(gs[0, 0:2], projection="3d"),
+        fig.add_subplot(gs[0, 2:4], projection="3d"),
+        fig.add_subplot(gs[0, 4:6], projection="3d"),
+        fig.add_subplot(gs[1, 1:3], projection="3d"),
+        fig.add_subplot(gs[1, 3:5], projection="3d"),
+    ]
+
+    _plot_single_surface(
+        axes[0], x, y, pne_grids["welfare_ratio"], "Greens",
+        "PNE Welfare Ratio", "ratio", (0.5, 1.0), elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+    high_gap = planner_grids["cov_high"] - pne_grids["cov_high"]
+    peri_gap = planner_grids["cov_peripheral"] - pne_grids["cov_peripheral"]
+    gap_abs = max(
+        0.05,
+        float(np.nanmax(np.abs(high_gap))),
+        float(np.nanmax(np.abs(peri_gap))),
+    )
+    gap_zlim = (-gap_abs, gap_abs)
+    _plot_gap_surface(
+        axes[1], x, y, high_gap,
+        "High-value Coverage Gap", gap_zlim,
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        deadband=gap_deadband,
+    )
+    _plot_gap_surface(
+        axes[2], x, y, peri_gap,
+        "Peripheral Coverage Gap", gap_zlim,
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        deadband=gap_deadband,
+    )
+
+    geo_max = max(
+        float(np.nanmax(pne_grids["geo_hhi"])),
+        float(np.nanmax(planner_grids["geo_hhi"])),
+        1 / K,
+    )
+    _plot_comparison_surface(
+        axes[3], x, y, pne_grids["geo_hhi"], planner_grids["geo_hhi"],
+        "Geographic HHI", "HHI", (1 / K, min(1.0, geo_max + 0.05)),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        filled_overlay=hhi_filled_overlay,
+        filled_overlay_alpha=hhi_filled_alpha,
+    )
+
+    util_max = max(
+        float(np.nanmax(pne_grids["utility_hhi"])),
+        float(np.nanmax(planner_grids["utility_hhi"])),
+        9 / (8 * K),
+    )
+    _plot_planner_on_top_surface(
+        axes[4], x, y, pne_grids["utility_hhi"], planner_grids["utility_hhi"],
+        "Utility HHI", "HHI", (1 / K, util_max + 0.01),
+        elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+    )
+
+    legend_handles = [
+        Patch(facecolor="#2ca02c", edgecolor="none", alpha=0.86,
+              label="PNE welfare ratio"),
+        Patch(facecolor="#004caa", edgecolor="none", alpha=0.88,
+              label="Coverage gap < 0: PNE higher"),
+        Patch(facecolor="#d62728", edgecolor="none", alpha=0.88,
+              label="Coverage gap > 0: Planner higher"),
+        Patch(facecolor="#004caa", edgecolor="none", alpha=0.68,
+              label="PNE HHI"),
+        Patch(facecolor="#d62728", edgecolor="none", alpha=0.58,
+              label="Planner HHI"),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=5,
+        frameon=False,
+        fontsize=16,
+        columnspacing=0.65,
+        handlelength=1.35,
+        handletextpad=0.35,
+        bbox_to_anchor=(0.5, 0.015),
+    )
+    fig.subplots_adjust(left=0.01, right=0.99, bottom=0.095, top=0.965)
+
+    if output_stem is None:
+        output_stem = f"exp3_k{K}_3d_surfaces_coverage_gap"
+    if paper_stem is None:
+        paper_stem = "paper_exp3_3d_surfaces_coverage_gap"
+    out = FIGURES_DIR / f"{output_stem}.pdf"
+    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(str(out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    paper_out = FIGURES_DIR / f"{paper_stem}.pdf"
+    fig.savefig(paper_out, bbox_inches="tight")
+    fig.savefig(str(paper_out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    print(f"Saved {out}")
+    print(f"Saved {paper_out}")
 
 
 def _save_cache(abr_runs, planner_runs, path):
@@ -396,8 +963,17 @@ def main():
         abr_runs, planner_runs = _compute(args)
         _save_cache(abr_runs, planner_runs, cache_path)
 
-    grids = _build_grids(abr_runs, planner_runs)
-    plot_heatmaps(grids)
+    pne_grids = _build_grids(abr_runs, planner_runs)
+    plot_heatmaps(pne_grids)
+
+    planner_grids = _build_planner_grids(planner_runs)
+    plot_heatmaps(
+        planner_grids,
+        output_stem=f"exp3_k{K}_planner_ratio_delta_heatmaps",
+        paper_stem="paper_exp3_planner_2x2",
+        title_prefix="Planner",
+    )
+    plot_3d_surfaces(pne_grids, planner_grids)
 
 
 def _compute(args):

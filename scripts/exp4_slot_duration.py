@@ -5,6 +5,10 @@ K=5 builders, 24 GCP regions (REGIONS_EXP1), 10 sources (5 high-value, 5
 peripheral). Per-source value ratio fixed at 10x (alpha ~ 0.91). Sweeps slot
 duration delta on a log scale from 10ms to 12s.
 
+Arrival rates are rescaled with delta so the expected emitted value per slot is
+fixed at the 50ms anchor value. With base rate lambda=1 at DELTA_ANCHOR,
+lambda(delta) = DELTA_ANCHOR / delta.
+
 For each delta we draw N_INSTANCES random source layouts and run
 N_SEEDS_PER_INSTANCE ABR runs from random initial placements. Reported
 curves are median + IQR over all (instance, seed) runs.
@@ -50,6 +54,7 @@ REGIONS_EXP1 = list(REGIONS_DEFAULT) + ["europe-west2", "asia-northeast2", "asia
 MASTER_SEED = 1234
 K = 5
 TOTAL_VALUE = 10.0
+BASE_LAMBDA_RATE = 1.0
 
 # Fixed value concentration: per-source ratio of 10x.
 # With n_high = n_peri = 5, alpha = (10 * 5) / (10 * 5 + 5) = 50/55 ~ 0.909.
@@ -101,7 +106,7 @@ BRUTE_FORCE_MAX_PROFILES = 10_000_000  # used only if OPT_METHOD == "auto"
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 10,
+    "font.size": 12,
     "axes.spines.top": False,
     "axes.spines.right": False,
 })
@@ -115,16 +120,23 @@ def sample_source_layout(rng):
     peri = list(rng.choice(PERIPHERAL_POOL, size=N_PERI, replace=False))
     return high, peri
 
+
+def lambda_rate_for_delta(delta):
+    """Keep expected emitted value per slot fixed as slot duration changes."""
+    return BASE_LAMBDA_RATE * DELTA_ANCHOR / delta
+
 def _worker(args):
     delta_idx, delta, instance_idx, seed_within_instance = args
     inst_rng = np.random.default_rng(MASTER_SEED + instance_idx)
     high_regions, peri_regions = sample_source_layout(inst_rng)
 
     regions, prop, region_index_map = load_propagation_model(REGIONS_EXP1)
+    lambda_rate = lambda_rate_for_delta(delta)
     sources = build_two_cluster_sources(
         ALPHA, TOTAL_VALUE, region_index_map,
         high_value_regions=high_regions,
         distant_regions=peri_regions,
+        lambda_rate=lambda_rate,
     )
     sliced_prop = make_sliced_prop(sources, prop)
     n_regions = len(regions)
@@ -149,6 +161,7 @@ def _worker(args):
     )
     result["delta_idx"] = delta_idx
     result["delta"] = float(delta)
+    result["lambda_rate"] = float(lambda_rate)
     result["instance_idx"] = instance_idx
     result["seed_within_instance"] = seed_within_instance
     result["high_regions"] = high_regions
@@ -169,10 +182,12 @@ def compute_planner_metrics_one(args):
     high_regions, peri_regions = sample_source_layout(inst_rng)
 
     regions, prop, region_index_map = load_propagation_model(REGIONS_EXP1)
+    lambda_rate = lambda_rate_for_delta(delta)
     sources = build_two_cluster_sources(
         ALPHA, TOTAL_VALUE, region_index_map,
         high_value_regions=high_regions,
         distant_regions=peri_regions,
+        lambda_rate=lambda_rate,
     )
     sliced_prop = make_sliced_prop(sources, prop)
     n_regions = len(regions)
@@ -192,6 +207,7 @@ def compute_planner_metrics_one(args):
     return {
         "delta_idx": delta_idx,
         "delta": float(delta),
+        "lambda_rate": float(lambda_rate),
         "instance_idx": instance_idx,
         "w_opt": w_opt,
         "opt_profile": opt_profile,
@@ -229,9 +245,12 @@ def save_results(delta_grid_ms, delta_grid, abr_runs_by_delta, planner_runs_by_d
             "VALUE_RATIO": VALUE_RATIO,
             "ALPHA": ALPHA,
             "TOTAL_VALUE": TOTAL_VALUE,
+            "BASE_LAMBDA_RATE": BASE_LAMBDA_RATE,
             "DELTA_GRID_MS": list(delta_grid_ms),
             "DELTA_GRID": delta_grid.tolist(),
             "DELTA_ANCHOR": DELTA_ANCHOR,
+            "arrival_rate_rule": "lambda_rate(delta) = BASE_LAMBDA_RATE * DELTA_ANCHOR / delta",
+            "expected_emitted_value_per_slot": BASE_LAMBDA_RATE * DELTA_ANCHOR * TOTAL_VALUE,
             "N_INSTANCES": N_INSTANCES,
             "N_SEEDS_PER_INSTANCE": N_SEEDS_PER_INSTANCE,
             "N_T": N_T,
@@ -321,184 +340,104 @@ def plot(delta_grid_ms, delta_grid, abr_runs_by_delta, planner_runs_by_delta, K,
         wr_med.append(m); wr_lo.append(lo); wr_hi.append(hi)
     wr_med = np.array(wr_med); wr_lo = np.array(wr_lo); wr_hi = np.array(wr_hi)
 
-    welfare_med, welfare_lo, welfare_hi = _abr_agg("welfare")
-    welfare_opt_med, welfare_opt_lo, welfare_opt_hi = _plan_agg("w_opt")
-
     geo_med, geo_lo, geo_hi = _abr_agg("geo_hhi")
     util_med, util_lo, util_hi = _abr_agg("utility_hhi")
     cov_hi_med, cov_hi_lo, cov_hi_hi = _abr_agg("cov_high")
     cov_pe_med, cov_pe_lo, cov_pe_hi = _abr_agg("cov_peripheral")
-    mpd_med, mpd_lo, mpd_hi = _abr_agg("mean_pairwise_km")
 
     geo_opt_med, geo_opt_lo, geo_opt_hi = _plan_agg("geo_hhi_opt")
+    util_opt_med, util_opt_lo, util_opt_hi = _plan_agg("utility_hhi_opt")
     cov_hi_opt_med, cov_hi_opt_lo, cov_hi_opt_hi = _plan_agg("cov_high_opt")
     cov_pe_opt_med, cov_pe_opt_lo, cov_pe_opt_hi = _plan_agg("cov_peripheral_opt")
-    mpd_opt_med, mpd_opt_lo, mpd_opt_hi = _plan_agg("mean_pairwise_km_opt")
-
-    fig = plt.figure(figsize=(14.5, 13.5))
-    gs = fig.add_gridspec(
-        nrows=3, ncols=6,
-        height_ratios=[1.0, 1.0, 1.0],
-        hspace=0.52, wspace=0.65,
-    )
-
-    # Row 1: panels A, B, C
-    ax_A = fig.add_subplot(gs[0, 0:2])
-    ax_B = fig.add_subplot(gs[0, 2:4])
-    ax_C = fig.add_subplot(gs[0, 4:6])
-    # Row 2: panels D, E, F
-    ax_D = fig.add_subplot(gs[1, 0:2])
-    ax_E = fig.add_subplot(gs[1, 2:4])
-    ax_F = fig.add_subplot(gs[1, 4:6])
-    # Row 3: panel G (mean pairwise distance), centered, narrower
-    ax_G = fig.add_subplot(gs[2, 1:5])
 
     x_ms = np.array(delta_grid_ms, dtype=float)
-    anchor_x = DELTA_ANCHOR * 1000  # 50
+    selected_label = "PNE"
+    selected_marker_kwargs = dict(marker="o", ms=4.0, mec=ABR_COLOR, mfc=ABR_COLOR)
+    plan_marker_kwargs = dict(marker="s", ms=3.8, mec=PLAN_COLOR, mfc=PLAN_COLOR)
 
-    band_label = "ABR IQR"
-    planner_band_label = "Planner IQR"
-    abr_marker_kwargs = dict(marker="o", ms=3.5, mec=ABR_COLOR, mfc=ABR_COLOR)
-    plan_marker_kwargs = dict(marker="s", ms=3.2, mec=PLAN_COLOR, mfc=PLAN_COLOR)
-    anchor_label = f"Anchor {int(anchor_x)} ms"
+    fig, axes = plt.subplots(2, 2, figsize=(12, 6.1))
+    ax_welfare, ax_geo = axes[0]
+    ax_util, ax_cov = axes[1]
 
-    # Panel A: welfare (bar chart)
-    ax = ax_A
-    x_idx = np.arange(len(delta_grid))
-    width = 0.38
-    ax.bar(
-        x_idx - width / 2, welfare_med, width=width, color=ABR_COLOR, alpha=0.75,
-        label="ABR median",
-        yerr=np.vstack([welfare_med - welfare_lo, welfare_hi - welfare_med]),
-        error_kw=dict(ecolor=ABR_COLOR, elinewidth=1.0, capsize=2),
-    )
-    ax.bar(
-        x_idx + width / 2, welfare_opt_med, width=width, color=PLAN_COLOR, alpha=0.55,
-        label="Planner median",
-        yerr=np.vstack([welfare_opt_med - welfare_opt_lo, welfare_opt_hi - welfare_opt_med]),
-        error_kw=dict(ecolor=PLAN_COLOR, elinewidth=1.0, capsize=2),
-    )
-    bar_tick_positions = list(range(0, len(delta_grid), 2))
-    if (len(delta_grid) - 1) not in bar_tick_positions:
-        bar_tick_positions.append(len(delta_grid) - 1)
-    ax.set_xticks(bar_tick_positions)
-    ax.set_xticklabels([f"{delta_grid_ms[i]}" for i in bar_tick_positions])
-    anchor_idx = delta_grid_ms.index(int(round(anchor_x)))
-    ax.axvspan(anchor_idx - 0.5, anchor_idx + 0.5,
-               color="black", alpha=0.06, label=anchor_label)
-    ax.set_xlabel(r"Slot duration $\Delta$ (ms)")
-    ax.set_ylabel("Expected welfare")
-    ax.set_title("(A) Welfare")
-    ax.legend(fontsize=8)
-    ax.grid(axis="y", alpha=0.2)
-
-    # Panel B: welfare ratio
-    ax = ax_B
-    ax.plot(x_ms, wr_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, wr_lo, wr_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.axhline(0.5, ls="--", color="gray", lw=1.0, label="PoA floor = 0.5")
+    # Welfare ratio.
+    ax = ax_welfare
+    ax.plot(x_ms, wr_med, "-", color=ABR_COLOR, lw=2.0,
+            label=selected_label, **selected_marker_kwargs)
+    ax.fill_between(x_ms, wr_lo, wr_hi, color=ABR_COLOR, alpha=0.16)
     ax.axhline(1.0, ls=":", color="black", lw=0.8, alpha=0.6)
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6, label=anchor_label)
     _set_delta_axis(ax, x_ms)
-    ax.set_ylabel(r"$W_{\rm ABR}\,/\,W^*$")
-    ax.set_ylim(0.45, 1.05)
-    ax.set_title("(B) Welfare ratio")
-    ax.legend(fontsize=8, loc="lower left")
+    ax.set_ylabel("Welfare Ratio")
+    ax.set_ylim(max(0.0, np.nanmin(wr_lo) - 0.02), 1.005)
+    ax.legend(fontsize=12, loc="lower right", frameon=False)
+    ax.grid(True, alpha=0.18)
 
-    # Panel C: geographic HHI
-    ax = ax_C
-    ax.plot(x_ms, geo_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, geo_lo, geo_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x_ms, geo_opt_med, "-.", color=PLAN_COLOR, lw=1.5, label="Planner median",
+    # Geographic HHI.
+    ax = ax_geo
+    ax.plot(x_ms, geo_med, "-", color=ABR_COLOR, lw=2.0,
+            label=selected_label, **selected_marker_kwargs)
+    ax.fill_between(x_ms, geo_lo, geo_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x_ms, geo_opt_med, "--", color=PLAN_COLOR, lw=2.0, label="Planner",
             **plan_marker_kwargs)
-    ax.fill_between(x_ms, geo_opt_lo, geo_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.axhline(1 / K, ls=":", color="black", lw=1.0, alpha=0.6,
-               label=rf"Floor $1/K = {1/K:.3f}$")
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6)
+    ax.fill_between(x_ms, geo_opt_lo, geo_opt_hi, color=PLAN_COLOR, alpha=0.12)
+    ax.axhline(1 / K, ls=":", color="black", lw=0.8, alpha=0.6, label=r"$1/K$")
     _set_delta_axis(ax, x_ms)
     ax.set_ylabel("Geographic HHI")
-    ax.set_title("(C) Geographic HHI")
-    ax.legend(fontsize=8)
+    geo_values = np.concatenate([geo_lo, geo_hi, geo_opt_lo, geo_opt_hi, [1 / K]])
+    geo_pad = max(0.01, 0.15 * (np.nanmax(geo_values) - np.nanmin(geo_values)))
+    ax.set_ylim(np.nanmin(geo_values) - geo_pad, np.nanmax(geo_values) + geo_pad)
+    ax.legend(fontsize=12, loc="upper left", frameon=False)
+    ax.grid(True, alpha=0.18)
 
-    # Panel D: utility HHI
-    ax = ax_D
-    ax.plot(x_ms, util_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, util_lo, util_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.axhline(9 / (8 * K), ls="--", color="gray", lw=1.0,
-               label=rf"NE ceiling $9/(8K)$")
-    ax.axhline(1 / K, ls=":", color="black", lw=1.0, alpha=0.6,
-               label=rf"Egalitarian $1/K$")
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6)
-    ax.set_ylim(1 / K - 0.005, 9 / (8 * K) + 0.005)
+    # Utility HHI.
+    ax = ax_util
+    ax.plot(x_ms, util_med, "-", color=ABR_COLOR, lw=2.0,
+            label=selected_label, **selected_marker_kwargs)
+    ax.fill_between(x_ms, util_lo, util_hi, color=ABR_COLOR, alpha=0.16)
+    ax.plot(x_ms, util_opt_med, "--", color=PLAN_COLOR, lw=2.0, label="Planner",
+            **plan_marker_kwargs)
+    ax.fill_between(x_ms, util_opt_lo, util_opt_hi, color=PLAN_COLOR, alpha=0.14)
+    ax.axhline(1 / K, ls=":", color="black", lw=0.8, alpha=0.6, label=r"$1/K$")
+    ax.axhline(9 / (8 * K), ls="--", color="gray", lw=0.8, alpha=0.85,
+               label=r"$9/(8K)$")
     _set_delta_axis(ax, x_ms)
     ax.set_ylabel("Utility HHI")
-    ax.set_title("(D) Utility HHI")
-    ax.legend(fontsize=8)
-
-    # Panel E: high-value cluster coverage
-    ax = ax_E
-    ax.plot(x_ms, cov_hi_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, cov_hi_lo, cov_hi_hi, color=ABR_COLOR, alpha=0.18,
-                    label=band_label)
-    ax.plot(x_ms, cov_hi_opt_med, "-.", color=PLAN_COLOR, lw=1.5,
-            label="Planner median", **plan_marker_kwargs)
-    ax.fill_between(x_ms, cov_hi_opt_lo, cov_hi_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6)
-    _set_delta_axis(ax, x_ms)
-    ax.set_ylabel("Coverage fraction")
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title("(E) High-value cluster coverage")
-    ax.legend(fontsize=8, loc="lower right")
-
-    # Panel F: peripheral cluster coverage
-    ax = ax_F
-    ax.plot(x_ms, cov_pe_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, cov_pe_lo, cov_pe_hi, color=ABR_COLOR, alpha=0.18,
-                    label=band_label)
-    ax.plot(x_ms, cov_pe_opt_med, "-.", color=PLAN_COLOR, lw=1.5,
-            label="Planner median", **plan_marker_kwargs)
-    ax.fill_between(x_ms, cov_pe_opt_lo, cov_pe_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6)
-    _set_delta_axis(ax, x_ms)
-    ax.set_ylabel("Coverage fraction")
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title("(F) Peripheral cluster coverage")
-    ax.legend(fontsize=8, loc="lower right")
-
-    # Panel G: mean pairwise distance (km)
-    ax = ax_G
-    ax.plot(x_ms, mpd_med, "-", color=ABR_COLOR, lw=1.5, label="ABR median",
-            **abr_marker_kwargs)
-    ax.fill_between(x_ms, mpd_lo, mpd_hi, color=ABR_COLOR, alpha=0.18,
-                    label=band_label)
-    ax.plot(x_ms, mpd_opt_med, "-.", color=PLAN_COLOR, lw=1.5,
-            label="Planner median", **plan_marker_kwargs)
-    ax.fill_between(x_ms, mpd_opt_lo, mpd_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.axvline(anchor_x, ls=":", color="black", lw=1.0, alpha=0.6, label=anchor_label)
-    _set_delta_axis(ax, x_ms)
-    ax.set_ylabel("Mean pairwise distance (km)")
-    ax.set_title("(G) Mean pairwise distance")
-    ax.legend(fontsize=8, loc="best")
-
-    fig.suptitle(
-        rf"Experiment 4: Slot duration sweep "
-        rf"($K={K}$, value ratio = {VALUE_RATIO:g}x [$\alpha \approx {ALPHA:.3f}$], "
-        rf"{N_INSTANCES} source instances $\times$ {N_SEEDS_PER_INSTANCE} inits)",
-        fontsize=12, y=0.995,
+    util_values = np.concatenate(
+        [util_lo, util_hi, util_opt_lo, util_opt_hi, [1 / K, 9 / (8 * K)]]
     )
+    util_pad = max(0.005, 0.08 * (np.nanmax(util_values) - np.nanmin(util_values)))
+    ax.set_ylim(np.nanmin(util_values) - util_pad, np.nanmax(util_values) + util_pad)
+    ax.legend(fontsize=12, loc="upper right", frameon=False)
+    ax.grid(True, alpha=0.18)
+
+    # Cluster coverage.
+    ax = ax_cov
+    ax.plot(x_ms, cov_hi_med, "-", color=ABR_COLOR, lw=2.0, marker="o", ms=4.0,
+            label="PNE high")
+    ax.fill_between(x_ms, cov_hi_lo, cov_hi_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x_ms, cov_pe_med, "-", color=ABR_COLOR, lw=2.0, marker="D", ms=3.8,
+            label="PNE peripheral")
+    ax.fill_between(x_ms, cov_pe_lo, cov_pe_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x_ms, cov_hi_opt_med, "--", color=PLAN_COLOR, lw=2.0, marker="s", ms=3.8,
+            label="Planner high")
+    ax.fill_between(x_ms, cov_hi_opt_lo, cov_hi_opt_hi, color=PLAN_COLOR, alpha=0.10)
+    ax.plot(x_ms, cov_pe_opt_med, "--", color=PLAN_COLOR, lw=2.0, marker="^", ms=4.0,
+            label="Planner peripheral")
+    ax.fill_between(x_ms, cov_pe_opt_lo, cov_pe_opt_hi, color=PLAN_COLOR, alpha=0.10)
+    _set_delta_axis(ax, x_ms)
+    ax.set_ylabel("Cluster Coverage")
+    ax.set_ylim(-0.02, 1.03)
+    ax.legend(fontsize=12, loc="center right", frameon=False)
+    ax.grid(True, alpha=0.18)
+
+    fig.tight_layout(pad=0.45, w_pad=0.9, h_pad=0.9)
     out = FIGURES_DIR / "exp4_slot_duration.pdf"
     fig.savefig(out, bbox_inches="tight")
     fig.savefig(str(out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    paper_out = FIGURES_DIR / "paper_exp4_2x2.pdf"
+    fig.savefig(paper_out, bbox_inches="tight")
+    fig.savefig(str(paper_out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
     print(f"Saved {out}")
+    print(f"Saved {paper_out}")
 
 def main():
     regions, _, _ = load_propagation_model(REGIONS_EXP1)
@@ -520,6 +459,10 @@ def main():
     print(f"Exp 4: slot duration sweep: {DELTA_GRID_MS} ms")
     print(f"MASTER_SEED={MASTER_SEED}")
     print(f"K={K}, value ratio={VALUE_RATIO:g}x (alpha={ALPHA:.4f})")
+    print(f"Arrival rates: lambda(delta) = {BASE_LAMBDA_RATE:g} * "
+          f"{DELTA_ANCHOR:g} / delta")
+    print(f"Expected emitted value per slot: "
+          f"{BASE_LAMBDA_RATE * DELTA_ANCHOR * TOTAL_VALUE:.4f}")
     print(f"Per delta: {N_INSTANCES} source instances x {N_SEEDS_PER_INSTANCE} "
           f"random inits = {n_runs_per_delta} ABR runs")
     print(f"Optimum method: {opt_method} (profile count = {n_profiles:,})")

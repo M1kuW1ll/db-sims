@@ -487,9 +487,15 @@ def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
         b.set_region(init_regions[i])
 
     np.random.seed(seed)
-    sim.run_abr_until_convergence(n_t=n_t, max_rounds=max_rounds)
+    rounds_used = sim.run_abr_until_convergence(n_t=n_t, max_rounds=max_rounds)
+    sim.abr_adaptation_steps = rounds_used
 
     final_profile = [b.current_region for b in sim.builders]
+    ne_check = sim.verify_pure_nash_equilibrium(
+        profile=final_profile,
+        n_time_steps=n_t_final,
+        tolerance=1e-12,
+    )
     welfare = _compute_welfare_analytical(final_profile, sources, sliced_prop, delta, n_t_final)
     utilities = compute_all_builder_utilities(
         final_profile, sources, sliced_prop, delta, n_t_final
@@ -500,6 +506,9 @@ def run_abr_full(K: int, sources: list, sliced_prop: PropagationModel,
 
     return {
         "final_profile": final_profile,
+        "converged": bool(ne_check["is_pure_ne"]),
+        "rounds_used": int(rounds_used),
+        "max_profitable_deviation": float(ne_check["max_gain"]),
         "welfare": welfare,
         "geo_hhi": geo_hhi(final_profile, n_regions),
         "mean_pairwise_km": mean_pairwise_distance_km(final_profile, list(regions)),

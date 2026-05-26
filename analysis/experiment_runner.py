@@ -30,7 +30,7 @@ def _run_single(config: ExperimentConfig, seed: int,
                 norm_alpha=config.norm_alpha,
             )
         elif config.policy_type == "ABR":
-            policy = FixedPolicy(config.n_regions)
+            policy = FixedPolicy(config.n_regions, initial_belief=initial_belief)
         else:
             raise ValueError(f"Unknown policy: {config.policy_type}")
         builders.append(Builder(i, policy))
@@ -52,9 +52,16 @@ def _run_single(config: ExperimentConfig, seed: int,
         initial_placement=config.initial_placement,
     )
     if config.policy_type == "ABR":
-        sim.run_abr(config.n_slots, n_t=config.n_t)
+        sim.run_async_better_response(
+            config.n_slots,
+            improvement_threshold_pct=config.improvement_threshold_pct,
+            n_time_steps=config.utility_eval_time_steps,
+            max_updates=config.abr_max_updates,
+            response_rule=config.abr_response_rule,
+        )
     else:
         sim.run(config.n_slots)
+
     result = ExperimentResult(config, sim)
     result.seed = seed
     return result
@@ -130,6 +137,12 @@ def print_results(result: ExperimentResult, regions: List[Region], sources: List
     print(f"Mean txs emitted per round: {stats['mean_txs_emitted_per_round']:.2f}")
     print(f"Mean txs received per round: {stats['mean_txs_received_per_round']:.2f}")
     print(f"Mean coverage ratio: {stats['mean_coverage_ratio']:.4f}")
+    print(f"Empirical epsilon-CCE gap: {stats['cce_gap']:.6f}")
+    if result.config.policy_type == "ABR":
+        print(f"ABR response rule: {result.config.abr_response_rule}")
+        print(f"ABR adaptation steps: {stats['abr_adaptation_steps']}")
+        print(f"ABR converged to pure NE: {stats['abr_converged']}")
+        print(f"ABR max profitable deviation: {stats['abr_max_profitable_deviation']:.6f}")
 
     print(f"\nRegion selection per slot (avg builders per slot):")
     for i, count in enumerate(stats['avg_region_counts']):

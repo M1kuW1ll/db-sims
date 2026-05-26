@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from sim.datasets import gcp_sources, load_gcp, subregion
-from sim.simulator import Region, Source
+from sim.simulator import ABR_RESPONSE_RULES, Region, Source
 
 PRIMARY_SEED = 0
 
@@ -32,6 +32,7 @@ class ExperimentConfig:
     latency_mean: Optional[np.ndarray] = None
     latency_std: Optional[np.ndarray] = None
 
+    # Policy / dynamic configuration
     # Propagation model: "lognormal" for stochastic (GCP), "fixed" for deterministic (synthetic)
     propagation_model_type: str = "lognormal"
 
@@ -40,14 +41,18 @@ class ExperimentConfig:
 
     # EXP3 policy parameters
     eta: float = 0.12
-    gamma: float = 0.05 # uniform exploration mixing parameter
-    gamma_schedule: str = "static" # "static" | "exponential" | "sqrt_decay" | "linear"
-    gamma_min: float = 0.01 # exploration floor for decaying schedules
+    gamma: float = 0.05  # uniform exploration mixing parameter
+    gamma_schedule: str = "static"  # "static" | "exponential" | "sqrt_decay" | "linear"
+    gamma_min: float = 0.01  # exploration floor for decaying schedules
     gamma_decay: float = 0.0002  # rate constant for exponential schedule
     norm_alpha: float = 0.0  # exponential moving average rate for adaptive normalisation (0 = disabled)
 
-    # ABR policy parameters
+    # Exact-response parameters
+    improvement_threshold_pct: float = 0.0
+    utility_eval_time_steps: int = 200
+    abr_max_updates: Optional[int] = None
     n_t: int = 100  # number of time discretisation points for the analytical integral
+    abr_response_rule: str = "best"
 
     # Simulation parameters
     n_builders: int = 8
@@ -72,6 +77,12 @@ class ExperimentConfig:
                 ("SourceC", self.n_regions - 1, 5.0, 1.0, 0.5),
             ]
 
+        self.abr_response_rule = self.abr_response_rule.lower()
+        if self.abr_response_rule not in ABR_RESPONSE_RULES:
+            raise ValueError(
+                f"Unknown ABR response rule: {self.abr_response_rule!r}. "
+                "Expected 'best' or 'better'."
+            )
 # YAML config loading
 def load_config(path) -> ExperimentConfig:
     """
@@ -153,7 +164,12 @@ def load_config(path) -> ExperimentConfig:
         gamma_min=pol.get("gamma_min", 0.01),
         gamma_decay=pol.get("gamma_decay", 0.0002),
         norm_alpha=pol.get("norm_alpha", 0.0),
-        n_t=pol.get("n_t", 100),
+        improvement_threshold_pct=pol.get("improvement_threshold_pct", 0.0),
+        utility_eval_time_steps=pol.get("utility_eval_time_steps", pol.get("n_t", 200)),
+        abr_max_updates=pol.get("abr_max_updates"),
+        n_t=pol.get("n_t", pol.get("utility_eval_time_steps", 100)),
+        abr_response_rule=pol.get("abr_response_rule", "best"),
+        placement_seed=sim.get("placement_seed", PRIMARY_SEED),
         initial_placement=sim.get("initial_placement", "dispersed"),
     )
 

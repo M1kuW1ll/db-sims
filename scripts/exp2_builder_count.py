@@ -45,7 +45,7 @@ from sim.metrics import hhi as _hhi
 REGIONS_EXP2 = list(REGIONS_DEFAULT) + ["europe-west2", "asia-northeast2", "asia-south2", "us-west2"]
 
 # Experiment parameters
-ALPHA = 0.9
+ALPHA = 10/11
 DELTA = 0.05
 TOTAL_VALUE = 10.0
 K_GRID = list(range(3, 13))  # K = 3 .. 12
@@ -80,7 +80,7 @@ BRUTE_FORCE_MAX_PROFILES = 10_000_000  # used only if OPT_METHOD == "auto"
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 10,
+    "font.size": 12,
     "axes.spines.top": False,
     "axes.spines.right": False,
 })
@@ -295,6 +295,14 @@ def _builder_counts(profiles, region_names):
     return counts
 
 
+def _set_K_axis(ax, x_vals, xlabel=False):
+    even_ticks = [k for k in x_vals if int(k) % 2 == 0]
+    ax.set_xlim(min(x_vals) - 0.45, max(x_vals) + 0.45)
+    ax.set_xticks(even_ticks if even_ticks else x_vals)
+    if xlabel:
+        ax.set_xlabel("Number of builders $K$")
+
+
 def plot(K_grid, abr_runs_by_K, planner_runs_by_K, n_runs_per_K, region_names):
     """abr_runs_by_K[K] = list of run dicts.
     planner_runs_by_K[K] = list of planner dicts (one per instance)."""
@@ -331,151 +339,106 @@ def plot(K_grid, abr_runs_by_K, planner_runs_by_K, n_runs_per_K, region_names):
     util_med, util_lo, util_hi = _abr_agg("utility_hhi")
     cov_hi_med, cov_hi_lo, cov_hi_hi = _abr_agg("cov_high")
     cov_pe_med, cov_pe_lo, cov_pe_hi = _abr_agg("cov_peripheral")
-    mpd_med, mpd_lo, mpd_hi = _abr_agg("mean_pairwise_km")
 
     geo_opt_med, geo_opt_lo, geo_opt_hi = _plan_agg("geo_hhi_opt")
+    util_opt_med, util_opt_lo, util_opt_hi = _plan_agg("utility_hhi_opt")
     cov_hi_opt_med, cov_hi_opt_lo, cov_hi_opt_hi = _plan_agg("cov_high_opt")
     cov_pe_opt_med, cov_pe_opt_lo, cov_pe_opt_hi = _plan_agg("cov_peripheral_opt")
-    mpd_opt_med, mpd_opt_lo, mpd_opt_hi = _plan_agg("mean_pairwise_km_opt")
 
     x = np.array(K_grid)
-    welfare_floor = np.array([1.0 / (2.0 - 1.0 / K) for K in K_grid])
     geo_floor = np.array([1.0 / K for K in K_grid])
     util_ceiling = np.array([9.0 / (8.0 * K) for K in K_grid])
     util_egalitarian = np.array([1.0 / K for K in K_grid])
 
-    band_label = (
-        f"ABR IQR "
-        f"({N_INSTANCES} source instances × {N_SEEDS_PER_INSTANCE} init)"
-    )
-    planner_band_label = f"Planner IQR ({N_INSTANCES} source instances)"
+    selected_label = "PNE"
+    selected_marker_kwargs = dict(marker="o", ms=4.0, mec=ABR_COLOR, mfc=ABR_COLOR)
+    plan_marker_kwargs = dict(marker="s", ms=3.8, mec=PLAN_COLOR, mfc=PLAN_COLOR)
 
-    # Layout: top row 2 panels, middle row 3 panels, bottom row 3 panels.
-    fig = plt.figure(figsize=(13, 11))
-    gs = fig.add_gridspec(
-        nrows=3, ncols=6,
-        height_ratios=[1.0, 1.0, 1.05],
-        hspace=0.45, wspace=0.55,
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(12, 6.1))
+    ax_welfare, ax_cov = axes[0]
+    ax_geo, ax_util = axes[1]
 
-    # Row 1: panels A and B
-    ax_A = fig.add_subplot(gs[0, 0:3])
-    ax_B = fig.add_subplot(gs[0, 3:6])
-    # Row 2: panels C, D, E
-    ax_C = fig.add_subplot(gs[1, 0:2])
-    ax_D = fig.add_subplot(gs[1, 2:4])
-    ax_E = fig.add_subplot(gs[1, 4:6])
-    # Row 3: mean pairwise distance and two maps
-    ax_F = fig.add_subplot(gs[2, 0:2])
-    ax_M1 = fig.add_subplot(gs[2, 2:4])
-    ax_M2 = fig.add_subplot(gs[2, 4:6])
-
-    # Panel A: welfare ratio
-    ax = ax_A
-    ax.plot(x, wr_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, wr_lo, wr_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, welfare_floor, "--", color="gray", lw=1.2, label=r"Floor $1/(2-1/K)$")
+    # Welfare ratio.
+    ax = ax_welfare
+    ax.plot(x, wr_med, "-", color=ABR_COLOR, lw=2.0, label="PNE",
+            **selected_marker_kwargs)
+    ax.fill_between(x, wr_lo, wr_hi, color=ABR_COLOR, alpha=0.16)
     ax.axhline(1.0, ls=":", color="black", lw=0.8, alpha=0.6)
-    ax.set_xlabel("Number of builders $K$")
-    ax.set_ylabel(r"$W_{\rm ABR}\,/\,W^*$")
-    ax.set_ylim(0.45, 1.05)
-    ax.set_title("(A) Welfare ratio")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.2)
+    _set_K_axis(ax, x)
+    ax.set_ylabel("Welfare Ratio")
+    ax.set_ylim(max(0.0, np.nanmin(wr_lo) - 0.02), 1.005)
+    ax.legend(fontsize=12, loc="lower right", frameon=False)
+    ax.grid(True, alpha=0.18)
 
-    # Panel B: geographic HHI
-    ax = ax_B
-    ax.plot(x, geo_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, geo_lo, geo_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, geo_opt_med, "-.", color=PLAN_COLOR, lw=1.5, label="Planner median")
-    ax.fill_between(x, geo_opt_lo, geo_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.plot(x, geo_floor, ":", color="black", lw=1.0, alpha=0.7, label=r"Floor $1/K$")
-    ax.set_xlabel("Number of builders $K$")
+    # Cluster coverage.
+    ax = ax_cov
+    ax.plot(x, cov_hi_med, "-", color=ABR_COLOR, lw=2.0, marker="o", ms=4.0,
+            label="PNE high")
+    ax.fill_between(x, cov_hi_lo, cov_hi_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x, cov_pe_med, "-", color=ABR_COLOR, lw=2.0, marker="D", ms=3.8,
+            label="PNE peripheral")
+    ax.fill_between(x, cov_pe_lo, cov_pe_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x, cov_hi_opt_med, "--", color=PLAN_COLOR, lw=2.0, marker="s", ms=3.8,
+            label="Planner high")
+    ax.fill_between(x, cov_hi_opt_lo, cov_hi_opt_hi, color=PLAN_COLOR, alpha=0.10)
+    ax.plot(x, cov_pe_opt_med, "--", color=PLAN_COLOR, lw=2.0, marker="^", ms=4.0,
+            label="Planner peripheral")
+    ax.fill_between(x, cov_pe_opt_lo, cov_pe_opt_hi, color=PLAN_COLOR, alpha=0.10)
+    _set_K_axis(ax, x)
+    ax.set_ylabel("Cluster Coverage")
+    ax.set_ylim(-0.02, 1.03)
+    ax.legend(fontsize=12, loc="center right", frameon=False)
+    ax.grid(True, alpha=0.18)
+
+    # Geographic HHI.
+    ax = ax_geo
+    ax.plot(x, geo_med, "-", color=ABR_COLOR, lw=2.0,
+            label=selected_label, **selected_marker_kwargs)
+    ax.fill_between(x, geo_lo, geo_hi, color=ABR_COLOR, alpha=0.12)
+    ax.plot(x, geo_opt_med, "--", color=PLAN_COLOR, lw=2.0, label="Planner",
+            **plan_marker_kwargs)
+    ax.fill_between(x, geo_opt_lo, geo_opt_hi, color=PLAN_COLOR, alpha=0.12)
+    ax.plot(x, geo_floor, ":", color="black", lw=0.8, alpha=0.6, label=r"$1/K$")
+    _set_K_axis(ax, x, xlabel=True)
     ax.set_ylabel("Geographic HHI")
-    ax.set_title("(B) Geographic HHI")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.2)
+    geo_values = np.concatenate([geo_lo, geo_hi, geo_opt_lo, geo_opt_hi, geo_floor])
+    geo_pad = max(0.01, 0.12 * (np.nanmax(geo_values) - np.nanmin(geo_values)))
+    ax.set_ylim(np.nanmin(geo_values) - geo_pad, np.nanmax(geo_values) + geo_pad)
+    ax.legend(fontsize=12, loc="upper right", frameon=False)
+    ax.grid(True, alpha=0.18)
 
-    # Panel C: utility HHI
-    ax = ax_C
-    ax.plot(x, util_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, util_lo, util_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, util_ceiling, "--", color="gray", lw=1.2, label=r"NE ceiling $9/(8K)$")
-    ax.plot(x, util_egalitarian, ":", color="black", lw=1.0, alpha=0.7,
-            label=r"Egalitarian $1/K$")
-    ax.set_xlabel("Number of builders $K$")
+    # Utility HHI.
+    ax = ax_util
+    ax.plot(x, util_med, "-", color=ABR_COLOR, lw=2.0,
+            label=selected_label, **selected_marker_kwargs)
+    ax.fill_between(x, util_lo, util_hi, color=ABR_COLOR, alpha=0.16)
+    ax.plot(x, util_opt_med, "--", color=PLAN_COLOR, lw=2.0, label="Planner",
+            **plan_marker_kwargs)
+    ax.fill_between(x, util_opt_lo, util_opt_hi, color=PLAN_COLOR, alpha=0.14)
+    ax.plot(x, util_egalitarian, ":", color="black", lw=0.8, alpha=0.6,
+            label=r"$1/K$")
+    ax.plot(x, util_ceiling, "--", color="gray", lw=0.8, alpha=0.85,
+            label=r"$9/(8K)$")
+    _set_K_axis(ax, x, xlabel=True)
     ax.set_ylabel("Utility HHI")
-    ax.set_title("(C) Utility HHI")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.2)
-
-    # Panel D: high-value cluster coverage
-    ax = ax_D
-    ax.plot(x, cov_hi_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, cov_hi_lo, cov_hi_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, cov_hi_opt_med, "-.", color=PLAN_COLOR, lw=1.5, label="Planner median")
-    ax.fill_between(x, cov_hi_opt_lo, cov_hi_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.set_xlabel("Number of builders $K$")
-    ax.set_ylabel("Coverage fraction")
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title("(D) High-value cluster coverage")
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(alpha=0.2)
-
-    # Panel E: peripheral cluster coverage
-    ax = ax_E
-    ax.plot(x, cov_pe_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, cov_pe_lo, cov_pe_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, cov_pe_opt_med, "-.", color=PLAN_COLOR, lw=1.5, label="Planner median")
-    ax.fill_between(x, cov_pe_opt_lo, cov_pe_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.set_xlabel("Number of builders $K$")
-    ax.set_ylabel("Coverage fraction")
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title("(E) Peripheral cluster coverage")
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(alpha=0.2)
-
-    # Panel F: mean pairwise distance
-    ax = ax_F
-    ax.plot(x, mpd_med, "-o", color=ABR_COLOR, lw=1.5, ms=4, label="ABR (median)")
-    ax.fill_between(x, mpd_lo, mpd_hi, color=ABR_COLOR, alpha=0.18, label=band_label)
-    ax.plot(x, mpd_opt_med, "-.", color=PLAN_COLOR, lw=1.5, label="Planner median")
-    ax.fill_between(x, mpd_opt_lo, mpd_opt_hi, color=PLAN_COLOR, alpha=0.14,
-                    label=planner_band_label)
-    ax.set_xlabel("Number of builders $K$")
-    ax.set_ylabel("Mean pairwise distance (km)")
-    ax.set_title("(F) Mean pairwise distance")
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.2)
-
-    # Bottom row: world maps at smallest and largest K with data.
-    Ks_with_data = [K for K in K_grid if abr_runs_by_K.get(K)]
-    if len(Ks_with_data) >= 2:
-        map_Ks = [Ks_with_data[0], Ks_with_data[-1]]
-    elif len(Ks_with_data) == 1:
-        map_Ks = [Ks_with_data[0], Ks_with_data[0]]
-    else:
-        map_Ks = []
-
-    for ax_map, K in zip([ax_M1, ax_M2], map_Ks):
-        profiles = [r["final_profile"] for r in abr_runs_by_K.get(K, [])]
-        counts = _builder_counts(profiles, region_names)
-        _plot_world_map(ax_map, counts, region_names, K,
-                        title=rf"$K = {K}$  (mean ABR placement)")
-
-    fig.suptitle(
-        rf"Experiment 2: Builder count sweep "
-        rf"($\alpha={ALPHA}$, $\Delta={int(DELTA*1000)}\,\mathrm{{ms}}$, "
-        rf"{N_INSTANCES} source instances $\times$ {N_SEEDS_PER_INSTANCE} inits)",
-        fontsize=12, y=0.995,
+    util_values = np.concatenate(
+        [util_lo, util_hi, util_opt_lo, util_opt_hi,
+         util_egalitarian, util_ceiling]
     )
+    util_pad = max(0.005, 0.08 * (np.nanmax(util_values) - np.nanmin(util_values)))
+    ax.set_ylim(np.nanmin(util_values) - util_pad, np.nanmax(util_values) + util_pad)
+    ax.legend(fontsize=12, loc="upper right", frameon=False)
+    ax.grid(True, alpha=0.18)
+
+    fig.tight_layout(pad=0.45, w_pad=0.9, h_pad=0.9)
     out = FIGURES_DIR / "exp2_builder_count.pdf"
     fig.savefig(out, bbox_inches="tight")
     fig.savefig(str(out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
+    paper_out = FIGURES_DIR / "paper_exp2_2x2.pdf"
+    fig.savefig(paper_out, bbox_inches="tight")
+    fig.savefig(str(paper_out).replace(".pdf", ".png"), dpi=180, bbox_inches="tight")
     print(f"Saved {out}")
+    print(f"Saved {paper_out}")
 
 
 def main():

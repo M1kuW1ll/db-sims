@@ -25,6 +25,9 @@ class ExperimentResult:
         self.tx_emitted_history = np.array(simulator.tx_emitted_history)
         self.tx_received_history = np.array(simulator.tx_received_history)
         self.builder_rewards_history = np.array(simulator.reward_history)
+        self.cce_gap_over_time = np.array(simulator.cce_gap_over_time)
+        self.cce_gap_by_builder = np.array(simulator.cce_gap_by_builder)
+        self.cce_best_deviation_regions = np.array(simulator.cce_best_deviation_regions)
 
         self.poa_stats = None  # populated by compute_poa_stats if requested
 
@@ -157,6 +160,9 @@ class ExperimentResult:
             region_volatility_over_time=np.array(self.region_volatility_over_time),
             builder_dist_volatility_over_time=np.array(self.builder_dist_volatility_over_time),
             value_share_volatility_over_time=np.array(self.value_share_volatility_over_time),
+            cce_gap_over_time=self.cce_gap_over_time,
+            cce_gap_by_builder=self.cce_gap_by_builder,
+            cce_best_deviation_regions=self.cce_best_deviation_regions,
             config=np.array([asdict(self.config)], dtype=object),
             stats=np.array([self.stats], dtype=object)
         )
@@ -183,6 +189,9 @@ class ExperimentResult:
         result.tx_emitted_history = data.get('tx_emitted_history', np.array([]))
         result.tx_received_history = data.get('tx_received_history', np.array([]))
         result.builder_rewards_history = data.get('builder_rewards_history', np.array([]))
+        result.cce_gap_over_time = data.get('cce_gap_over_time', np.array([]))
+        result.cce_gap_by_builder = data.get('cce_gap_by_builder', np.array([]))
+        result.cce_best_deviation_regions = data.get('cce_best_deviation_regions', np.array([]))
         result.region_reward_pairs = []
         result.poa_stats = None
 
