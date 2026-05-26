@@ -118,7 +118,7 @@ def compare_experiments(results: List[ExperimentResult],
         exp_names = "_vs_".join([r.config.name[:15] for r in results[:3]])  # Limit to first 3 names
         if len(results) > 3:
             exp_names += f"_and_{len(results)-3}_more"
-        results_dir = Path(result.config.results_dir)
+        results_dir = Path(results[0].config.results_dir)
         results_dir.mkdir(exist_ok=True)
         filename = results_dir / f'comparison_{exp_names}.png'
         plt.savefig(filename, dpi=150, bbox_inches='tight')
@@ -301,15 +301,10 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
 
     # Main title
     policy_info = result.config.policy_type
-    if result.config.policy_type == "EMA":
-        policy_info += f" (η={result.config.eta}, β_reg={result.config.beta_reg}, c={result.config.cost_c})"
-    elif result.config.policy_type == "UCB":
-        policy_info += f" (α={result.config.alpha}, c={result.config.cost_c})"
-    elif result.config.policy_type == "EXP3":
+    if result.config.policy_type == "EXP3":
         norm = result.config.payoff_normalization
         norm_str = f"{norm:.3f}" if norm is not None else "auto"
-        eta_str = f", η={result.config.exp3_eta}" if result.config.exp3_eta is not None else ""
-        policy_info += f" (γ={result.config.gamma}, norm={norm_str}{eta_str})"
+        policy_info += f" (η={result.config.eta}, γ={result.config.gamma}, norm={norm_str})"
     elif result.config.policy_type == "ABR":
         policy_info += (
             f" (rule={result.config.abr_response_rule}, "
@@ -317,10 +312,6 @@ def plot_experiment_details(result: ExperimentResult, save_plots: bool = True):
             f"grid={result.config.utility_eval_time_steps}, "
             f"updates={result.config.abr_max_updates if result.config.abr_max_updates is not None else 'auto'})"
         )
-    elif result.config.policy_type == "MWU":
-        norm = result.config.payoff_normalization
-        norm_str = f"{norm:.3f}" if norm is not None else "auto"
-        policy_info += f" (η={result.config.mwu_eta}, norm={norm_str})"
     else:
         policy_info += " (custom)"
 

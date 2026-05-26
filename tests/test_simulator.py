@@ -10,14 +10,12 @@ from analysis.experiment_runner import ExperimentConfig
 from sim.config import create_scenario_from_config
 from sim.simulator import (
     Builder,
-    EMASoftmaxPolicy,
     EXP3Policy,
     EqualSplitSharingRule,
     FixedPolicy,
     LatencyPropagationModel,
     LocationGamesSimulator,
     Region,
-    RoundOutcome,
     Source,
     StochasticTransactionGenerator,
     Transaction,
@@ -127,7 +125,7 @@ class TestWelfare(unittest.TestCase):
         latency_std = np.array([[1.0], [1.0]])
         model = LatencyPropagationModel(latency_mean, latency_std)
 
-        builders = [Builder(i, EMASoftmaxPolicy(2)) for i in range(4)]
+        builders = [Builder(i, FixedPolicy(2)) for i in range(4)]
         sim = LocationGamesSimulator(
             regions=regions,
             sources=sources,
@@ -411,73 +409,6 @@ class TestAsynchronousBetterResponse(unittest.TestCase):
         self.assertFalse(sim.abr_converged)
         self.assertTrue(sim.abr_cycle_detected)
         self.assertEqual(sim.abr_cycle_length, 2)
-
-
-class TestMWU(unittest.TestCase):
-    def test_counterfactual_payoffs_account_for_other_receivers(self):
-        regions = [Region(0, "A"), Region(1, "B")]
-        sources = [Source(0, "S0", 0, 1.0, 0.0, 0.01)]
-        latency_mean = np.array([[0.01], [0.01]])
-        latency_std = np.array([[0.001], [0.001]])
-        builders = [Builder(i, FixedPolicy(2)) for i in range(2)]
-
-        sim = LocationGamesSimulator(
-            regions=regions,
-            sources=sources,
-            builders=builders,
-            tx_generator=StochasticTransactionGenerator(),
-            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
-            sharing_rule=EqualSplitSharingRule(),
-            delta=1.0,
-            seed=0,
-        )
-
-        outcome = RoundOutcome(
-            all_tx_values={0: 1.0, 1: 2.0},
-            actual_tx_receivers={0: [0], 1: [0, 1]},
-            tx_receiving_regions={0: [0], 1: [0, 1]},
-            rewards={0: 2.0, 1: 1.0},
-            tx_emitted_count=2,
-            tx_received_count=2,
-            builder_region_receipts={
-                0: np.array([
-                    [True, False],
-                    [True, False],
-                ], dtype=bool),
-                1: np.array([
-                    [True, True],
-                    [False, True],
-                ], dtype=bool),
-            },
-        )
-        payoffs = sim._compute_mwu_counterfactual_payoffs({0: 0, 1: 1}, outcome)
-
-        np.testing.assert_allclose(payoffs[0], [2.0, 1.0])
-        np.testing.assert_allclose(payoffs[1], [0.5, 1.0])
-
-    def test_mwu_runs_and_records_history(self):
-        regions = [Region(0, "Fast"), Region(1, "Slow")]
-        sources = [Source(0, "S0", 0, 2.0, 0.0, 0.01)]
-        latency_mean = np.array([[0.01], [100.0]])
-        latency_std = np.array([[0.001], [1.0]])
-        builders = [Builder(i, FixedPolicy(2)) for i in range(2)]
-
-        sim = LocationGamesSimulator(
-            regions=regions,
-            sources=sources,
-            builders=builders,
-            tx_generator=StochasticTransactionGenerator(),
-            propagation_model=LatencyPropagationModel(latency_mean, latency_std),
-            sharing_rule=EqualSplitSharingRule(),
-            delta=1.0,
-            seed=0,
-        )
-
-        sim.run_mwu(n_slots=5, eta=0.2, payoff_normalization=2.0)
-
-        self.assertEqual(len(sim.region_counts_history), 5)
-        self.assertEqual(len(sim.reward_history), 5)
-        self.assertEqual(len(sim.welfare_history), 5)
 
 
 class TestEXP3(unittest.TestCase):

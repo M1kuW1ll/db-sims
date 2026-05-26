@@ -1,16 +1,13 @@
 # Decentralized Block Building Simulator
 
-Simulator for studying geographic location choice incentives in decentralized block building. Builders compete to include transactions from information sources distributed across regions, split rewards with other builders that include the same transaction, and choose regions selfishly to maximize capture. The simulator supports `EMA`-Softmax, `UCB`, `EXP3`, asynchronous strict better response (`ABR`), and multiplicative weights update (`MWU`), and reports Price of Anarchy, coverage, concentration, and inequality metrics.
+Simulator for studying geographic location choice incentives in decentralized block building. Builders compete to include transactions from information sources distributed across regions, split rewards with other builders that include the same transaction, and choose regions selfishly to maximize capture. The simulator supports `EXP3` bandit learning and asynchronous better response (`ABR`), and reports Price of Anarchy, coverage, concentration, and inequality metrics.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
-python run.py configs/ema_baseline.yaml
-python run.py configs/exp3_baseline.yaml
-python run.py configs/abr_baseline.yaml
-python run.py configs/mwu_baseline.yaml
 python run.py configs/ABR/sym_linear_equal.yaml
+python run.py configs/EXP3/sym_linear_equal.yaml
 ```
 
 To run all configs in a directory:
@@ -52,7 +49,7 @@ Results and plots are saved to `results/`.
 
 ### Learning Algorithms
 
-There are also stochastic learning policies (EXP3, EMA-Softmax, UCB) available via `policy_type`. These are useful for studying out-of-equilibrium dynamics that may not have the same convergence guarantees.
+The EXP3 bandit policy is also available via `policy_type: EXP3`. It is useful for studying out-of-equilibrium dynamics but does not have the same convergence guarantees as ABR.
 
 ## Experiments
 
@@ -72,27 +69,23 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 
 | Parameter | Description |
 |---|---|
-| `policy_type` | `"EMA"`, `"UCB"`, `"EXP3"`, `"ABR"`, or `"MWU"` |
+| `policy_type` | `"ABR"` or `"EXP3"` |
 | `n_builders` | Number of builders |
 | `n_slots` | Number of simulation slots |
 | `delta` | Slot duration (seconds) |
-| `eta`, `beta_reg` | EMA learning rate and softmax temperature |
-| `alpha` | UCB exploration bonus |
-| `gamma` / `exp3_gamma` | EXP3 exploration parameter |
+| `eta` | EXP3 learning rate |
+| `gamma` | EXP3 exploration parameter |
 | `gamma_schedule` | EXP3 exploration schedule (`static`, `exponential`, `sqrt_decay`, or `linear`) |
 | `abr_response_rule` | ABR move rule: `"best"` for argmax best response, `"better"` for a uniformly random improving move |
 | `improvement_threshold_pct` | Relative improvement threshold for ABR moves (use `0.0` for exact pure-NE search) |
 | `utility_eval_time_steps` | Deterministic integration grid size for exact ABR utility evaluation |
 | `abr_max_updates` | Maximum ABR unilateral moves during adaptation before frozen evaluation |
-| `mwu_eta` | MWU learning rate |
-| `payoff_normalization` | Optional EXP3/MWU payoff scale before clipping to `[0, 1]` |
-| `cost_c` | Migration cost |
+| `payoff_normalization` | Optional EXP3 payoff scale before clipping to `[0, 1]` |
 
 ## Dynamics
 
 - `EXP3`: each builder maintains a mixed strategy over regions, samples one region per round, and applies an importance-weighted update using only the realized reward of the sampled region.
 - `ABR`: first runs a pure-profile adaptation phase under exact expected builder utility, updating builders asynchronously with either argmax best responses (`abr_response_rule: "best"`, the default) or uniformly random better responses (`abr_response_rule: "better"`), until no improving move remains or `abr_max_updates` is reached. It then freezes the resulting profile and evaluates it over stochastic rounds.
-- `MWU`: each builder maintains a mixed strategy over regions, samples an action every round, then updates all region weights using full-information counterfactual realized payoffs from that same stochastic round.
 
 ## Metrics
 
@@ -102,7 +95,7 @@ All scripts use ABR with GCP empirical latency data and randomized information s
 - **Cluster coverage**: fraction of expected value captured from each information source cluster
 - **Mean pairwise distance**: geographic spread of the converged builder placement
 
-**Analysis pipeline (`run.py` + `analysis/`), used with learning algorithms:**
+**Analysis pipeline (`run.py` + `analysis/`):**
 - Gini, entropy, HHI of location and utility distributions (time series)
 - Value-capture HHI, top-1/top-3 concentration
 - Volatility: L1 change in region and value-share distributions between slots

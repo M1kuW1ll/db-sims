@@ -3,11 +3,8 @@
 Decentralized Building Simulator (db-sims) - Core simulation engine.
 
 Supported dynamics:
-  (A) EMA + softmax
-  (B) Individual UCB bandit
-  (C) Individual EXP3 bandit
-  (D) Asynchronous exact-response dynamics (best or better response)
-  (E) Full-information multiplicative weights update (MWU)
+  (A) EXP3 bandit learning
+  (B) Exact-response ABR dynamics
 """
 from collections import defaultdict
 import numpy as np
@@ -65,74 +62,6 @@ class LearningPolicy(ABC):
     @abstractmethod
     def get_name(self) -> str:
         pass
-
-
-class EMASoftmaxPolicy(LearningPolicy):
-    """Policy A: EMA + softmax."""
-
-    def __init__(
-        self,
-        n_regions: int,
-        eta: float = 0.1,
-        beta: float = 2.0,
-        cost: float = 0.0,
-        initial_belief: float = 0.0,
-    ):
-        super().__init__(n_regions, initial_belief)
-        self.eta = eta
-        self.beta = beta
-        self.cost = cost
-
-    def choose(self, current_region: int) -> int:
-        shifted = self.beta * (self.beliefs - np.max(self.beliefs))
-        exp_scores = np.exp(shifted)
-        probs_reg = exp_scores / np.sum(exp_scores)
-        region_id = int(np.random.choice(len(self.beliefs), p=probs_reg))
-
-        if self.beliefs[region_id] - self.beliefs[current_region] <= self.cost:
-            return current_region
-
-        return region_id
-
-    def update(self, region_id: int, reward: float):
-        self.beliefs[region_id] = (1 - self.eta) * self.beliefs[region_id] + self.eta * reward
-
-    def get_name(self) -> str:
-        return "EMA-Softmax"
-
-
-class UCBPolicy(LearningPolicy):
-    """Policy B: individual UCB bandit."""
-
-    def __init__(
-        self,
-        n_regions: int,
-        alpha: float = 1.0,
-        cost: float = 0.0,
-        initial_belief: float = 0.0,
-    ):
-        super().__init__(n_regions, initial_belief)
-        self.alpha = alpha
-        self.cost = cost
-        self.N = np.zeros(len(self.beliefs))
-        self.t = 0
-
-    def choose(self, current_region: int) -> int:
-        exploration_bonus = self.alpha * np.sqrt(np.log(1 + self.t) / (1 + self.N))
-        ucb_scores = self.beliefs + exploration_bonus
-
-        region_id = int(np.argmax(ucb_scores))
-        if ucb_scores[region_id] - ucb_scores[current_region] <= self.cost:
-            return current_region
-        return region_id
-
-    def update(self, region_id: int, reward: float):
-        self.N[region_id] += 1
-        self.beliefs[region_id] += (reward - self.beliefs[region_id]) / self.N[region_id]
-        self.t += 1
-
-    def get_name(self) -> str:
-        return "UCB"
 
 
 class FixedPolicy(LearningPolicy):
@@ -457,7 +386,7 @@ class LocationGamesSimulator:
 
     Implements reward sharing among builders based on their chosen regions and the transactions they capture
     which are generated stochastically from information sources. Builders learn and adapt their region choices
-    over time based on observed rewards, using a configured policy or better-response dynamic.
+    over time using EXP3 learning or exact-response ABR dynamics.
     """
 
     def __init__(self,
@@ -1075,69 +1004,6 @@ class LocationGamesSimulator:
 
         self._clear_history()
         self.evaluate_fixed_profile(n_slots=n_slots, profile=final_profile)
-
-    def _compute_mwu_counterfactual_payoffs(
-        self,
-        builder_selected_regions: Dict[int, int],
-        outcome: RoundOutcome,
-    ) -> np.ndarray:
-        if outcome.builder_region_receipts is None:
-            raise ValueError("MWU counterfactual payoffs require builder-level receipt samples.")
-
-        payoffs = np.zeros((self.n_builders, self.n_regions))
-        del builder_selected_regions
-
-        for tx_id, candidate_receipts in outcome.builder_region_receipts.items():
-            value = outcome.all_tx_values[tx_id]
-            actual_receivers = outcome.actual_tx_receivers.get(tx_id, [])
-            actual_receiver_count = len(actual_receivers)
-            actual_receiver_mask = np.zeros(self.n_builders, dtype=bool)
-            actual_receiver_mask[actual_receivers] = True
-
-            for builder_id in range(self.n_builders):
-                other_receivers = actual_receiver_count - int(actual_receiver_mask[builder_id])
-                payoffs[builder_id, candidate_receipts[builder_id]] += value / (1 + other_receivers)
-
-        return payoffs
-
-    def run_mwu(
-        self,
-        n_slots: int,
-        eta: float = 0.1,
-        payoff_normalization: Optional[float] = None,
-    ):
-        weights = np.ones((self.n_builders, self.n_regions), dtype=float)
-        if payoff_normalization is None or payoff_normalization <= 0:
-            payoff_normalization = float(
-                sum(
-                    source.lambda_rate * self.delta * np.exp(source.mu_val + source.sigma_val ** 2 / 2)
-                    for source in self.sources
-                )
-            )
-        payoff_normalization = max(payoff_normalization, 1.0)
-
-        for _ in range(n_slots):
-            probabilities = weights / weights.sum(axis=1, keepdims=True)
-            builder_selected_regions = {}
-            for builder in self.builders:
-                chosen_region = int(np.random.choice(self.n_regions, p=probabilities[builder.id]))
-                builder.set_region(chosen_region)
-                builder_selected_regions[builder.id] = chosen_region
-
-            outcome = self._simulate_round_for_profile(builder_selected_regions, evaluate_all_regions=True)
-            counterfactual_payoffs = self._compute_mwu_counterfactual_payoffs(builder_selected_regions, outcome)
-            normalized_payoffs = np.clip(counterfactual_payoffs / payoff_normalization, 0.0, 1.0)
-            weights *= np.exp(eta * normalized_payoffs)
-
-            slot_rewards = [outcome.rewards.get(builder.id, 0.0) for builder in self.builders]
-            region_counts = self._get_builder_distribution()
-            self._record_state(
-                region_counts=region_counts,
-                slot_rewards=slot_rewards,
-                welfare=float(sum(slot_rewards)),
-                tx_emitted=outcome.tx_emitted_count,
-                tx_received=outcome.tx_received_count,
-            )
 
     def run(self, n_slots: int):
         for _ in range(n_slots):

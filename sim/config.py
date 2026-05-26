@@ -36,24 +36,17 @@ class ExperimentConfig:
     # Propagation model: "lognormal" for stochastic (GCP), "fixed" for deterministic (synthetic)
     propagation_model_type: str = "lognormal"
 
-    policy_type: str = "EMA"  # "EMA", "UCB", "EXP3", "ABR", or "MWU"
-
-    # EMA policy parameters
-    eta: float = 0.12
-    beta_reg: float = 1.5
-    cost_c: float = 0.0
-
-    # UCB policy parameters
-    alpha: float = 2.0
+    # Policy configuration
+    policy_type: str = "ABR"
 
     # EXP3 policy parameters
-    exp3_gamma: float = 0.07
+    eta: float = 0.12
     gamma: float = 0.05  # uniform exploration mixing parameter
-    exp3_eta: Optional[float] = None
     gamma_schedule: str = "static"  # "static" | "exponential" | "sqrt_decay" | "linear"
     gamma_min: float = 0.01  # exploration floor for decaying schedules
     gamma_decay: float = 0.0002  # rate constant for exponential schedule
-    norm_alpha: float = 0.0  # EMA rate for adaptive normalisation (0 = disabled)
+    norm_alpha: float = 0.0  # exponential moving average rate for adaptive normalisation (0 = disabled)
+    payoff_normalization: Optional[float] = None  # Optional EXP3 payoff scale before clipping to [0, 1]
 
     # Exact-response parameters
     improvement_threshold_pct: float = 0.0
@@ -63,10 +56,6 @@ class ExperimentConfig:
     n_t: int = 100  # number of time discretisation points for the analytical integral
     abr_response_rule: str = "best"
     abr_update_mode: str = "async"
-
-    # MWU parameters
-    mwu_eta: float = 0.1
-    payoff_normalization: Optional[float] = None  # Used by EXP3 and MWU reward clipping
 
     # Simulation parameters
     n_builders: int = 8
@@ -180,16 +169,12 @@ def load_config(path) -> ExperimentConfig:
         n_runs=sim.get("n_runs", 1),
         policy_type=pol["type"],
         eta=pol.get("eta", 0.12),
-        beta_reg=pol.get("beta_reg", 1.5),
-        cost_c=pol.get("cost_c", 0.0),
-        alpha=pol.get("alpha", 2.0),
-        exp3_gamma=pol.get("exp3_gamma", pol.get("gamma", 0.07)),
         gamma=pol.get("gamma", pol.get("exp3_gamma", 0.05)),
-        exp3_eta=pol.get("eta"),
         gamma_schedule=pol.get("gamma_schedule", "static"),
         gamma_min=pol.get("gamma_min", 0.01),
         gamma_decay=pol.get("gamma_decay", 0.0002),
         norm_alpha=pol.get("norm_alpha", 0.0),
+        payoff_normalization=pol.get("payoff_normalization"),
         improvement_threshold_pct=pol.get("improvement_threshold_pct", 0.0),
         utility_eval_time_steps=pol.get("utility_eval_time_steps", pol.get("n_t", 200)),
         abr_max_updates=pol.get("abr_max_updates"),
@@ -197,8 +182,6 @@ def load_config(path) -> ExperimentConfig:
         n_t=pol.get("n_t", pol.get("utility_eval_time_steps", 100)),
         abr_response_rule=pol.get("abr_response_rule", "best"),
         abr_update_mode=pol.get("abr_update_mode", "async"),
-        mwu_eta=pol.get("mwu_eta", pol.get("eta", 0.1)),
-        payoff_normalization=pol.get("payoff_normalization"),
         placement_seed=sim.get("placement_seed", PRIMARY_SEED),
         initial_placement=sim.get("initial_placement", "dispersed"),
     )
