@@ -445,9 +445,9 @@ def _format_surface_axis(ax, title, _zlabel, zlim, elev=24, azim=-58,
     delta_ticks = [10, 50, 250, 1000, 6000, 12000]
     ratio_ticks = [1, 2, 5, 10, 20]
 
-    ax.set_title(title, fontsize=14, pad=5)
-    ax.set_xlabel("Slot duration (ms)", fontsize=11, labelpad=8)
-    ax.set_ylabel("Value ratio", fontsize=11, labelpad=8)
+    ax.set_title(title, fontsize=17, pad=0)
+    ax.set_xlabel("Slot duration (ms)", fontsize=13, labelpad=6)
+    ax.set_ylabel("Value ratio", fontsize=13, labelpad=6)
     ax.set_xticks(np.log10(delta_ticks))
     ax.set_xticklabels([str(t) for t in delta_ticks], rotation=45, ha="right")
     ax.set_yticks(np.log10(ratio_ticks))
@@ -455,9 +455,10 @@ def _format_surface_axis(ax, title, _zlabel, zlim, elev=24, azim=-58,
     if invert_y_axis:
         ax.set_ylim(np.log10(max(ratio_ticks)), np.log10(min(ratio_ticks)))
     ax.set_zlim(*zlim)
-    ax.tick_params(axis="x", labelsize=10, pad=-7)
-    ax.tick_params(axis="y", labelsize=10, pad=2)
-    ax.tick_params(axis="z", labelsize=10, pad=2)
+    ax.tick_params(axis="x", labelsize=12, pad=-8)
+    ax.tick_params(axis="y", labelsize=12, pad=1)
+    ax.tick_params(axis="z", labelsize=12, pad=1)
+    ax.set_box_aspect((1.15, 1.0, 0.72), zoom=1.08)
     ax.view_init(elev=elev, azim=azim)
     ax.xaxis.pane.set_facecolor((1, 1, 1, 0.0))
     ax.yaxis.pane.set_facecolor((1, 1, 1, 0.0))
@@ -539,10 +540,21 @@ def _plot_value_wireframe(ax, x, y, z, zlim, cmap_name, offset=0.0,
     ax.add_collection3d(line_collection)
 
 
-def _gap_facecolors(z, zlim, alpha):
-    norm = colors.TwoSlopeNorm(vmin=zlim[0], vcenter=0.0, vmax=zlim[1])
-    facecolors = plt.get_cmap("RdBu_r")(norm(z))
-    facecolors[..., -1] = alpha
+def _gap_facecolors(z, zlim, alpha, deadband=0.0):
+    max_abs = max(abs(zlim[0]), abs(zlim[1]), 1e-12)
+    abs_z = np.abs(z)
+    denom = max(max_abs - deadband, 1e-12)
+    magnitude = np.clip((abs_z - deadband) / denom, 0.0, 1.0)
+    facecolors = np.empty(z.shape + (4,), dtype=float)
+
+    neg = z < -deadband
+    pos = z > deadband
+    neutral = ~(neg | pos)
+
+    facecolors[neg] = _pne_blue_cmap()(magnitude[neg])
+    facecolors[pos] = plt.get_cmap("Reds")(0.30 + 0.70 * magnitude[pos])
+    facecolors[neutral] = (0.96, 0.96, 0.94, alpha * 0.35)
+    facecolors[..., -1] = np.where(neutral, alpha * 0.35, alpha)
     return facecolors
 
 
@@ -618,7 +630,8 @@ def _plot_comparison_surface(ax, x, y, pne_z, planner_z, title, zlabel, zlim,
 
 
 def _plot_gap_surface(ax, x, y, gap_z, title, zlim,
-                      elev=24, azim=-58, invert_y_axis=False):
+                      elev=24, azim=-58, invert_y_axis=False,
+                      deadband=0.0):
     ax.plot_surface(
         x, y, np.zeros_like(gap_z),
         color=(0.5, 0.5, 0.5, 0.16),
@@ -628,7 +641,7 @@ def _plot_gap_surface(ax, x, y, gap_z, title, zlim,
     )
     ax.plot_surface(
         x, y, gap_z,
-        facecolors=_gap_facecolors(gap_z, zlim, 0.88),
+        facecolors=_gap_facecolors(gap_z, zlim, 0.88, deadband=deadband),
         shade=False,
         edgecolor=(0, 0, 0, 0.18),
         linewidth=0.25,
@@ -641,6 +654,38 @@ def _plot_gap_surface(ax, x, y, gap_z, title, zlim,
     )
 
 
+def _plot_planner_on_top_surface(ax, x, y, pne_z, planner_z, title, zlabel, zlim,
+                                 elev=24, azim=-58, invert_y_axis=False):
+    pne_norm_zlim = _finite_zlim(pne_z, zlim)
+    ax.plot_surface(
+        x, y, pne_z,
+        facecolors=_pne_overlay_facecolors(
+            pne_z, alpha=0.70, norm_zlim=pne_norm_zlim
+        ),
+        shade=False,
+        edgecolor=(0.02, 0.11, 0.28, 0.18),
+        linewidth=0.25,
+        antialiased=True,
+    )
+
+    lift = 0.006 * (zlim[1] - zlim[0])
+    ax.plot_surface(
+        x, y, planner_z + lift,
+        facecolors=_surface_facecolors(
+            planner_z, zlim, "Reds", 0.86, cmap_floor=0.30
+        ),
+        shade=False,
+        edgecolor=(0.55, 0.05, 0.05, 0.22),
+        linewidth=0.25,
+        antialiased=True,
+    )
+    _format_surface_axis(
+        ax, title, zlabel, (zlim[0], zlim[1] + lift),
+        elev=elev, azim=azim,
+        invert_y_axis=invert_y_axis,
+    )
+
+
 def plot_3d_surfaces(pne_grids, planner_grids, output_stem=None,
                      paper_stem=None, elev=24, azim=-58,
                      invert_y_axis=False, coverage_mesh_overlay=False,
@@ -648,8 +693,8 @@ def plot_3d_surfaces(pne_grids, planner_grids, output_stem=None,
                      hhi_filled_overlay=False, coverage_filled_alpha=0.52,
                      hhi_filled_alpha=0.52):
     x, y = _surface_mesh()
-    fig = plt.figure(figsize=(15, 8.6))
-    gs = fig.add_gridspec(2, 6, hspace=0.22, wspace=0.02)
+    fig = plt.figure(figsize=(15.4, 8.25))
+    gs = fig.add_gridspec(2, 6, hspace=0.15, wspace=-0.03)
 
     axes = [
         fig.add_subplot(gs[0, 0:2], projection="3d"),
@@ -722,7 +767,7 @@ def plot_3d_surfaces(pne_grids, planner_grids, output_stem=None,
         loc="lower center",
         ncol=3,
         frameon=False,
-        fontsize=12,
+        fontsize=16,
         bbox_to_anchor=(0.5, 0.02),
     )
     fig.subplots_adjust(left=0.02, right=0.98, bottom=0.10, top=0.94)
@@ -743,10 +788,13 @@ def plot_3d_surfaces(pne_grids, planner_grids, output_stem=None,
 
 def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
                                   paper_stem=None, elev=24, azim=-58,
-                                  invert_y_axis=False):
+                                  invert_y_axis=False,
+                                  hhi_filled_overlay=False,
+                                  hhi_filled_alpha=0.52,
+                                  gap_deadband=0.05):
     x, y = _surface_mesh()
-    fig = plt.figure(figsize=(15, 8.6))
-    gs = fig.add_gridspec(2, 6, hspace=0.22, wspace=0.02)
+    fig = plt.figure(figsize=(15.4, 8.25))
+    gs = fig.add_gridspec(2, 6, hspace=0.15, wspace=-0.03)
 
     axes = [
         fig.add_subplot(gs[0, 0:2], projection="3d"),
@@ -774,11 +822,13 @@ def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
         axes[1], x, y, high_gap,
         "High-value Coverage Gap", gap_zlim,
         elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        deadband=gap_deadband,
     )
     _plot_gap_surface(
         axes[2], x, y, peri_gap,
         "Peripheral Coverage Gap", gap_zlim,
         elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        deadband=gap_deadband,
     )
 
     geo_max = max(
@@ -790,6 +840,8 @@ def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
         axes[3], x, y, pne_grids["geo_hhi"], planner_grids["geo_hhi"],
         "Geographic HHI", "HHI", (1 / K, min(1.0, geo_max + 0.05)),
         elev=elev, azim=azim, invert_y_axis=invert_y_axis,
+        filled_overlay=hhi_filled_overlay,
+        filled_overlay_alpha=hhi_filled_alpha,
     )
 
     util_max = max(
@@ -797,7 +849,7 @@ def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
         float(np.nanmax(planner_grids["utility_hhi"])),
         9 / (8 * K),
     )
-    _plot_comparison_surface(
+    _plot_planner_on_top_surface(
         axes[4], x, y, pne_grids["utility_hhi"], planner_grids["utility_hhi"],
         "Utility HHI", "HHI", (1 / K, util_max + 0.01),
         elev=elev, azim=azim, invert_y_axis=invert_y_axis,
@@ -806,11 +858,11 @@ def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
     legend_handles = [
         Patch(facecolor="#2ca02c", edgecolor="none", alpha=0.86,
               label="PNE welfare ratio"),
-        Patch(facecolor="#2166ac", edgecolor="none", alpha=0.88,
+        Patch(facecolor="#004caa", edgecolor="none", alpha=0.88,
               label="Coverage gap < 0: PNE higher"),
-        Patch(facecolor="#b2182b", edgecolor="none", alpha=0.88,
+        Patch(facecolor="#d62728", edgecolor="none", alpha=0.88,
               label="Coverage gap > 0: Planner higher"),
-        Patch(facecolor="#1f77b4", edgecolor="none", alpha=0.68,
+        Patch(facecolor="#004caa", edgecolor="none", alpha=0.68,
               label="PNE HHI"),
         Patch(facecolor="#d62728", edgecolor="none", alpha=0.58,
               label="Planner HHI"),
@@ -820,10 +872,13 @@ def plot_3d_surfaces_coverage_gap(pne_grids, planner_grids, output_stem=None,
         loc="lower center",
         ncol=5,
         frameon=False,
-        fontsize=9,
-        bbox_to_anchor=(0.5, 0.02),
+        fontsize=16,
+        columnspacing=0.65,
+        handlelength=1.35,
+        handletextpad=0.35,
+        bbox_to_anchor=(0.5, 0.015),
     )
-    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.10, top=0.94)
+    fig.subplots_adjust(left=0.01, right=0.99, bottom=0.095, top=0.965)
 
     if output_stem is None:
         output_stem = f"exp3_k{K}_3d_surfaces_coverage_gap"
